@@ -303,12 +303,31 @@ win32\build\release\startup-gcc.exe help             :: 管理子命令列表（
 GUI 窗口功能（结构化编辑每个参数）：
 
 - 左侧应用列表（新增/删除应用），右侧每个参数一个控件：
-  名称、命令行、启动后等待毫秒、**依赖多选列表**（Ctrl/Shift 多选）；
+  名称、命令行（**带“浏览...”按钮**）、启动后等待毫秒、**依赖多选列表**（Ctrl/Shift 多选）；
 - 改名会自动同步其他应用对它的依赖引用；删除应用会清除悬空引用；
 - 保存配置：按列表顺序重新生成规范格式的 `conf\startup.conf`（共享 `cfg_save()`，与 CLI 产出一致）；
 - 校验依赖顺序（打印拓扑序）、按序启动应用；
 - 安装/卸载/启动/停止服务、刷新状态（显示服务安装与否、启动类型、运行状态）；
 - 核心日志（解析错误、环、启动记录）全部重定向到状态框。
+
+### 脚本应用与解释器自动前置（Win32）
+
+“浏览...”按钮打开文件对话框，可筛选 `.exe` 及 `.bat/.cmd/.ps1/.py/.js/.vbs/.wsf/.pl/.sh/.lua`
+脚本。**配置与编辑框里只存带引号的脚本路径**；真正的解释器命令行在**执行时**才由
+`app_build_cmdline()`（`win32_service.c`）即时生成：
+
+| 存储的 cmd | 实际执行 | 可用性检测 |
+|---|---|---|
+| `"D:\tools\app.exe"` | 直接执行 | — |
+| `"D:\scripts\run.bat"` / `.cmd` | `cmd.exe /c "…bat"` | 总是可执行 |
+| `"D:\scripts\task.ps1"` | `cmd.exe /c powershell.exe -NoProfile -ExecutionPolicy Bypass -File "…"` | `SearchPathA` 找 powershell |
+| `"D:\scripts\x.py"`（.js/.vbs/…） | `"关联解释器" "脚本"` | `FindExecutableA` 查系统文件关联 |
+
+选择文件时就先检测：系统没有该类型的可执行解释器（无关联/缺运行时）→ 状态框提示，
+**不写入**命令行；已选择脚本的“将实际运行为：…”完整命令显示在状态框（不在编辑框）。
+执行侧同样兜底：无解释器的条目启动失败并记日志（服务不会崩）。手工写完整命令
+（如 `python x.py --opt`）不受影响，原样执行。示例见 `win32\test\scripts.conf`
+（batapp/psapp 正常执行，unknownapp 被拒绝），可用于 `serve` 冒烟。
 
 - 服务注册的 binPath 为 `"<exe>" service`，开机由 SCM 带 `service` 参数拉起。
 - `service`/`serve` 都以 supervisor 模式常驻：启动全部应用后保留其句柄，并在命名管道

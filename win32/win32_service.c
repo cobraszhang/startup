@@ -84,14 +84,97 @@ static void WINAPI ctrl_handler(DWORD ctrl)
 /* launching                                                            */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* execution-time interpreter resolution (documented in win32_app.h)   */
+/* ------------------------------------------------------------------ */
+
+static void lower_copy(char *dst, size_t dstsz, const char *src)
+{
+    size_t i;
+    for (i = 0; i + 1 < dstsz && src[i]; i++) {
+        char c = src[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        dst[i] = c;
+    }
+    dst[i] = '\0';
+}
+
+static void passthrough(const char *stored, char *out, size_t outsz)
+{
+    strncpy(out, stored, outsz - 1);
+    out[outsz - 1] = '\0';
+}
+
+int app_build_cmdline(const char *stored, char *out, size_t outsz)
+{
+    char        path[MAX_PATH * 2];
+    char        assoc[MAX_PATH * 2];
+    char        ext[16];
+    const char *p = stored;
+    char       *dot;
+    size_t      i;
+
+    /* only a lone quoted path is interpreted; everything else (plain
+     * commands, paths with extra arguments) is used exactly as stored */
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') { passthrough(stored, out, outsz); return 0; }
+    p++;
+    i = 0;
+    while (*p && *p != '"' && i + 1 < sizeof(path)) path[i++] = *p++;
+    if (*p != '"') { passthrough(stored, out, outsz); return 0; }
+    path[i] = '\0';
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p) { passthrough(stored, out, outsz); return 0; }
+
+    dot = strrchr(path, '.');
+    ext[0] = '\0';
+    if (dot) lower_copy(ext, sizeof(ext), dot + 1);
+
+    /* real executables launch directly */
+    if (!ext[0] || strcmp(ext, "exe") == 0 || strcmp(ext, "com") == 0 ||
+        strcmp(ext, "pif") == 0) {
+        passthrough(stored, out, outsz);
+        return 0;
+    }
+
+    if (strcmp(ext, "bat") == 0 || strcmp(ext, "cmd") == 0) {
+        if (strlen(path) + 16 >= outsz) return -1;
+        sprintf(out, "cmd.exe /c \"%s\"", path);
+        return 0;
+    }
+
+    if (strcmp(ext, "ps1") == 0) {
+        if (SearchPathA(NULL, "powershell.exe", ".exe",
+                        (DWORD)sizeof(assoc) - 1, assoc, NULL) == 0)
+            return -1;               /* no PowerShell on this system */
+        if (strlen(path) + 80 >= outsz) return -1;
+        sprintf(out, "cmd.exe /c powershell.exe -NoProfile "
+                     "-ExecutionPolicy Bypass -File \"%s\"", path);
+        return 0;
+    }
+
+    /* remaining script types: use the shell-registered interpreter,
+     * if the system has one (py / js / vbs / wsf / pl / ...) */
+    assoc[0] = '\0';
+    if ((int)(INT_PTR)FindExecutableA(path, NULL, assoc) <= 32 || !assoc[0])
+        return -1;
+    if (strlen(assoc) + strlen(path) + 6 >= outsz) return -1;
+    sprintf(out, "\"%s\" \"%s\"", assoc, path);
+    return 0;
+}
+
 static int launch_app(const app_t *a)
 {
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
     char cmdline[CMD_MAX];
 
-    strncpy(cmdline, a->cmd, sizeof(cmdline) - 1);
-    cmdline[sizeof(cmdline) - 1] = '\0';
+    if (app_build_cmdline(a->cmd, cmdline, sizeof(cmdline)) != 0) {
+        log_msg("launch: no interpreter available for '%s' (cmd='%s')",
+                a->name, a->cmd);
+        return -1;
+    }
 
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
@@ -210,8 +293,11 @@ static int sup_launch(int i)
     PROCESS_INFORMATION pi;
     char cmdline[CMD_MAX];
 
-    strncpy(cmdline, g_sapps[i].cmd, sizeof(cmdline) - 1);
-    cmdline[sizeof(cmdline) - 1] = '\0';
+    if (app_build_cmdline(g_sapps[i].cmd, cmdline, sizeof(cmdline)) != 0) {
+        log_msg("sup: no interpreter available for '%s' (cmd='%s')",
+                g_sapps[i].name, g_sapps[i].cmd);
+        return -1;
+    }
 
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);

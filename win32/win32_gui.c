@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <commdlg.h>
 
 #include "cfg.h"
 #include "topo.h"
@@ -40,6 +41,7 @@
 #define ID_SVCS      207
 #define ID_SVCT      208
 #define ID_REFRESH   209
+#define ID_BROWSE    210
 
 static HWND  g_list = NULL, g_depslb = NULL, g_stated = NULL;
 static HWND  g_nameed = NULL, g_cmded = NULL, g_waited = NULL;
@@ -445,6 +447,50 @@ static HWND mk_listbox(HWND p, int id, int x, int y, int w, int h,
     return l;
 }
 
+/* file picker for the command line field: the configuration keeps
+ * only the quoted file path; the interpreter (if any) is prepended
+ * later, at execution time (app_build_cmdline). */
+static void browse_cmd(HWND h)
+{
+    static char filt[] =
+        "支持的程序与脚本\0*.exe;*.bat;*.cmd;*.ps1;*.py;*.js;*.vbs;*.wsf;*.pl;*.sh;*.lua\0"
+        "可执行文件 (*.exe)\0*.exe\0"
+        "批处理脚本 (*.bat;*.cmd)\0*.bat;*.cmd\0"
+        "PowerShell 脚本 (*.ps1)\0*.ps1\0"
+        "Python 脚本 (*.py)\0*.py\0"
+        "JavaScript (*.js)\0*.js\0"
+        "VBScript (*.vbs;*.wsf)\0*.vbs;*.wsf\0"
+        "所有文件 (*.*)\0*.*\0";
+    OPENFILENAMEA of;
+    char file[MAX_PATH * 2];
+    char probe[4096];
+    char quoted[4096];
+
+    file[0] = '\0';
+    memset(&of, 0, sizeof(of));
+    of.lStructSize     = sizeof(of);
+    of.hwndOwner       = h;
+    of.lpstrFilter     = filt;
+    of.lpstrFile       = file;
+    of.nMaxFile        = (DWORD)sizeof(file) - 1;
+    of.lpstrInitialDir = NULL;
+    of.Flags           = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST |
+                         OFN_HIDEREADONLY;
+    if (!GetOpenFileNameA(&of)) return;      /* cancelled: keep as is */
+
+    sprintf(quoted, "\"%s\"", file);
+    if (app_build_cmdline(quoted, probe, sizeof(probe)) != 0) {
+        log_msg("浏览：系统中未找到可执行该脚本的解释器（无文件关联或缺少"
+                "运行时），未写入命令行。");
+        return;
+    }
+    SetWindowTextA(g_cmded, quoted);
+    if (strcmp(probe, quoted) != 0)
+        log_msg("浏览：已选择；执行时将实际运行为：%s", probe);
+    else
+        log_msg("浏览：已选择 %s", file);
+}
+
 static void on_create(HWND h)
 {
     HFONT fui = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
@@ -469,7 +515,8 @@ static void on_create(HWND h)
     mk_label(h, "启动后等待（毫秒）：", 525, 30, 200, fui);
     g_waited = mk_edit(h, ID_F_WAIT, 525, 48, 100, 24, 0, fui);
     mk_label(h, "命令行：", 225, 84, 200, fui);
-    g_cmded = mk_edit(h, ID_F_CMD, 225, 102, 649, 24, 0, g_font_fixed);
+    g_cmded = mk_edit(h, ID_F_CMD, 225, 102, 572, 24, 0, g_font_fixed);
+    mk_button(h, "浏览...", ID_BROWSE, 802, 101, 72, fui);
     mk_label(h, "依赖（多选：Ctrl/Shift 点击）：", 225, 138, 300, fui);
     g_depslb = mk_listbox(h, ID_DEPSLIST, 225, 156, 300, 142,
                           LBS_MULTIPLESEL, fui);
@@ -525,6 +572,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         case ID_SVCS:    svc_control("start", 0);     refresh_service(); break;
         case ID_SVCT:    svc_control("stop", 0);      refresh_service(); break;
         case ID_REFRESH: refresh_service(); break;
+        case ID_BROWSE:  browse_cmd(h); break;
         }
         return 0;
     }
