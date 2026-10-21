@@ -36,6 +36,13 @@
 #define CMD_MAX        4096
 #define START_WAIT_MS  3000   /* wait hint while starting / stopping */
 
+/* Vista-era flag; absent from the VC6 SDK headers. Apps are started
+ * without any console window (silently), which also keeps user-session
+ * supervisors from littering the desktop with conhost windows. */
+#ifndef CREATE_NO_WINDOW
+#  define CREATE_NO_WINDOW 0x08000000
+#endif
+
 static SERVICE_STATUS_HANDLE g_ssh   = NULL;
 static SERVICE_STATUS        g_status;
 static HANDLE                g_stop  = NULL;   /* manual-reset stop event */
@@ -91,7 +98,7 @@ static int launch_app(const app_t *a)
     memset(&pi, 0, sizeof(pi));
 
     if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-                        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
                         NULL, NULL, &si, &pi)) {
         log_msg("launch: FAILED '%s' (cmd='%s') err=%lu",
                 a->name, a->cmd, (unsigned long)GetLastError());
@@ -211,7 +218,7 @@ static int sup_launch(int i)
     memset(&pi, 0, sizeof(pi));
 
     if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-                        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
                         NULL, NULL, &si, &pi)) {
         log_msg("sup: start '%s' failed (cmd='%s') err=%lu",
                 g_sapps[i].name, g_sapps[i].cmd,
