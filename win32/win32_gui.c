@@ -18,11 +18,13 @@
 #include <string.h>
 #include <stdarg.h>
 #include <commdlg.h>
+#include <commctrl.h>
 
 #include "cfg.h"
 #include "topo.h"
 #include "log.h"
 #include "win32_app.h"
+#include "ipc.h"
 #include "version.h"
 
 #define ID_APPLIST   100
@@ -42,9 +44,15 @@
 #define ID_SVCT      208
 #define ID_REFRESH   209
 #define ID_BROWSE    210
+#define ID_PROCLIST  211
+#define ID_APPSTART  212
+#define ID_APPSTOP   213
+#define ID_APPRESTART 214
+#define ID_APPREFRESH 215
 
 static HWND  g_list = NULL, g_depslb = NULL, g_stated = NULL;
 static HWND  g_nameed = NULL, g_cmded = NULL, g_waited = NULL;
+static HWND  g_proclv = NULL;
 static HFONT g_font_fixed = NULL;
 static char  g_confpath[MAX_PATH * 2];
 
@@ -447,6 +455,112 @@ static HWND mk_listbox(HWND p, int id, int x, int y, int w, int h,
     return l;
 }
 
+/* ------- child-app process control: talks to the running supervisor ----- */
+
+static void lv_setup(HWND p, HFONT f)
+{
+    LV_COLUMNA col;
+
+    g_proclv = CreateWindowExA(WS_EX_CLIENTEDGE, "SysListView32", "",
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
+        10, 394, 760, 120, p, (HMENU)(LONG_PTR)ID_PROCLIST,
+        GetModuleHandleA(NULL), NULL);
+    if (!g_proclv) return;
+    SendMessageA(g_proclv, WM_SETFONT, (WPARAM)f, TRUE);
+    SendMessageA(g_proclv, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
+                 LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    memset(&col, 0, sizeof(col));
+    col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+    col.pszText = (LPSTR)"名称";       col.cx = 240; col.iSubItem = 0;
+    SendMessageA(g_proclv, LVM_INSERTCOLUMNA, 0, (LPARAM)&col);
+    col.pszText = (LPSTR)"状态";       col.cx = 110; col.iSubItem = 1;
+    SendMessageA(g_proclv, LVM_INSERTCOLUMNA, 1, (LPARAM)&col);
+    col.pszText = (LPSTR)"进程号";     col.cx = 90;  col.iSubItem = 2;
+    SendMessageA(g_proclv, LVM_INSERTCOLUMNA, 2, (LPARAM)&col);
+}
+
+/* parse "  name state pid=NNN" reply lines of the STATUS verb */
+static void refresh_proclist(void)
+{
+    char      ep[512], reply[8192];
+    char      name[128], state[64], pidv[64];
+    LVITEMA   it;
+    ipc_conn *c;
+    char     *p, *nl;
+    int       row = 0, n;
+
+    if (!g_proclv) return;
+    SendMessageA(g_proclv, LVM_DELETEALLITEMS, 0, 0);
+    ipc_default_endpoint(ep, sizeof(ep));
+    c = ipc_client_open(ep);
+    if (!c) {
+        log_msg("进程列表：未找到服务进程（端点 %s）——需服务或 supervisor 在运行", ep);
+        return;
+    }
+    n = ipc_client_call(c, "STATUS", reply, sizeof(reply));
+    ipc_client_close(c);
+    if (n < 0) { log_msg("进程列表：服务进程无应答"); return; }
+    p = reply;
+    while (p && *p) {
+        nl = strchr(p, 10);
+        if (nl) *nl = 0;
+        if (*p == 32 &&
+            sscanf(p, " %127s %63s %63s", name, state, pidv) == 3 &&
+            strncmp(pidv, "pid=", 4) == 0) {
+            memset(&it, 0, sizeof(it));
+            it.mask = LVIF_TEXT; it.iItem = row; it.iSubItem = 0;
+            it.pszText = name;
+            if ((int)SendMessageA(g_proclv, LVM_INSERTITEMA, 0,
+                                  (LPARAM)&it) >= 0) {
+                it.iSubItem = 1; it.pszText = state;
+                SendMessageA(g_proclv, LVM_SETITEMTEXTA, row, (LPARAM)&it);
+                it.iSubItem = 2; it.pszText = pidv + 4;
+                SendMessageA(g_proclv, LVM_SETITEMTEXTA, row, (LPARAM)&it);
+                row++;
+            }
+        }
+        p = nl ? nl + 1 : (char *)0;
+    }
+}
+
+static int proc_selected_name(char *name, size_t sz)
+{
+    LVITEMA it;
+    int     row = (int)SendMessageA(g_proclv, LVM_GETNEXTITEM,
+                                    -1, LVNI_SELECTED);
+
+    if (row < 0) { log_msg("请先在进程列表中选中一个子应用"); return 0; }
+    memset(&it, 0, sizeof(it));
+    it.mask = LVIF_TEXT; it.iItem = row; it.iSubItem = 0;
+    it.pszText = name; it.cchTextMax = (int)sz;
+    SendMessageA(g_proclv, LVM_GETITEMTEXTA, row, (LPARAM)&it);
+    return name[0] != 0;
+}
+
+static void app_cmd(const char *verb)
+{
+    char      ep[512], req[IPC_LINE_MAX], reply[4096];
+    char      name[128];
+    ipc_conn *c;
+    char     *nl;
+
+    if (!g_proclv) return;
+    if (!proc_selected_name(name, sizeof(name))) return;
+    ipc_default_endpoint(ep, sizeof(ep));
+    c = ipc_client_open(ep);
+    if (!c) { log_msg("控制：未找到服务进程（端点 %s）", ep); return; }
+    sprintf(req, "%s %s", verb, name);
+    if (ipc_client_call(c, req, reply, sizeof(reply)) < 0) {
+        log_msg("控制：服务进程无应答");
+    } else {
+        nl = strchr(reply, 10);
+        if (nl) *nl = 0;
+        log_msg("控制应答：%s", reply);
+    }
+    ipc_client_close(c);
+    refresh_proclist();
+}
+
 /* file picker for the command line field: the configuration keeps
  * only the quoted file path; the interpreter (if any) is prepended
  * later, at execution time (app_build_cmdline). */
@@ -532,11 +646,18 @@ static void on_create(HWND h)
     mk_button(h, "停止服务", ID_SVCT,    298, 344, 90, fui);
     mk_button(h, "刷新状态", ID_REFRESH, 394, 344, 90, fui);
 
-    mk_label(h, "状态 / 输出：", 10, 378, 200, fui);
+    mk_label(h, "子应用进程控制（与运行中的服务进程通讯）：", 10, 378, 480, fui);
+    lv_setup(h, fui);
+    mk_button(h, "启动应用",  ID_APPSTART,   780, 394, 104, fui);
+    mk_button(h, "停止应用",  ID_APPSTOP,    780, 424, 104, fui);
+    mk_button(h, "重启应用",  ID_APPRESTART, 780, 454, 104, fui);
+    mk_button(h, "刷新列表",  ID_APPREFRESH, 780, 484, 104, fui);
+
+    mk_label(h, "状态 / 输出：", 10, 540, 200, fui);
     g_stated = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
         WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY |
         ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL,
-        10, 394, 864, 190, h, (HMENU)(LONG_PTR)ID_STATEDIT,
+        10, 556, 864, 230, h, (HMENU)(LONG_PTR)ID_STATEDIT,
         GetModuleHandleA(NULL), NULL);
     if (g_stated)
         SendMessageA(g_stated, WM_SETFONT, (WPARAM)g_font_fixed, TRUE);
@@ -545,6 +666,7 @@ static void on_create(HWND h)
     model_load();
     refresh_list(g_n > 0 ? 0 : -1);
     refresh_service();
+    refresh_proclist();
 }
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
@@ -573,6 +695,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         case ID_SVCT:    svc_control("stop", 0);      refresh_service(); break;
         case ID_REFRESH: refresh_service(); break;
         case ID_BROWSE:  browse_cmd(h); break;
+        case ID_APPSTART:   app_cmd("START");   break;
+        case ID_APPSTOP:    app_cmd("STOP");    break;
+        case ID_APPRESTART: app_cmd("RESTART"); break;
+        case ID_APPREFRESH: refresh_proclist(); break;
         }
         return 0;
     }
@@ -593,6 +719,13 @@ int gui_main(const char *confpath)
     MSG        msg;
     HWND       hwnd;
 
+    {
+        INITCOMMONCONTROLSEX icc;
+        icc.dwSize = sizeof(icc);
+        icc.dwICC  = ICC_LISTVIEW_CLASSES;
+        InitCommonControlsEx(&icc);
+    }
+
     strncpy(g_confpath, confpath, sizeof(g_confpath) - 1);
     g_confpath[sizeof(g_confpath) - 1] = '\0';
 
@@ -612,7 +745,7 @@ int gui_main(const char *confpath)
                 APPBOOT_VERSION);
         hwnd = CreateWindowExA(0, wc.lpszClassName, ttl,
         WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 900, 640,
+        CW_USEDEFAULT, CW_USEDEFAULT, 900, 830,
             NULL, NULL, wc.hInstance, NULL);
     }
     if (!hwnd) return 1;

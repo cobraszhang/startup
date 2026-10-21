@@ -73,11 +73,12 @@ win32\dist\                 posix/dist/
   README.md
 ```
 
-- Windows：`win32\package_win32.cmd`（自动先调用 build_win32.cmd）
+- Windows：`win32\package_win32.cmd`（自动先调用 build_win32.cmd；**只更新 bin 与
+  README，`dist\conf\startup.conf` 是现场用户配置，从不覆盖**，仅在缺失时用样例播种）
 - POSIX：`cd posix && make package`
 
 部署 = 把 `win32\dist`（或 `posix/dist`）整体拷到目标机器任意目录；服务注册：
-`<安装目录>\bin\startup-gcc.exe install`（管理员）。
+`<安装目录>\bin\startup-gcc.exe install`（非管理员会自动弹出 UAC 提权确认）。
 
 ## 配置文件位置
 
@@ -294,8 +295,8 @@ Makefile 会自动加 `-DHAVE_GUI` 编译 `gui_gtk.c` 并链接 GTK（其 includ
 win32\build\release\startup-gcc.exe                  :: 无参数：打开 GUI 配置/状态窗口
 win32\build\release\startup-gcc.exe service          :: 服务入口（SCM 用；install 时自动写入 binPath）
 win32\build\release\startup-gcc.exe serve            :: 前台 supervisor（不注册服务，也有控制接口）
-win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动启动，需管理员）
-win32\build\release\startup-gcc.exe start | stop | uninstall
+win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动启动；非管理员自动 UAC 提权）
+win32\build\release\startup-gcc.exe start | stop | uninstall   :: uninstall 会先停服务并等待其停止再真正删除
 win32\build\release\startup-gcc.exe run | console -c test\order.conf   :: 不装服务，直接在控制台调试
 win32\build\release\startup-gcc.exe help             :: 管理子命令列表（见上文“命令行管理接口”）
 ```
@@ -308,6 +309,10 @@ GUI 窗口功能（结构化编辑每个参数）：
 - 保存配置：按列表顺序重新生成规范格式的 `conf\startup.conf`（共享 `cfg_save()`，与 CLI 产出一致）；
 - 校验依赖顺序（打印拓扑序）、按序启动应用；
 - 安装/卸载/启动/停止服务、刷新状态（显示服务安装与否、启动类型、运行状态）；
+  安装/卸载在权限不足时自动触发 UAC 提权（弹窗确认后重试，GUI 无需以管理员运行）；
+- **子应用进程控制区**：列表实时显示运行中服务进程所管理的应用（名称/状态/进程号，
+  通过控制 IPC 的 `STATUS`），右侧按钮对选中行执行 启动应用/停止应用/重启应用/刷新列表；
+  未找到服务进程时列表清空并在状态框提示端点；
 - 核心日志（解析错误、环、启动记录）全部重定向到状态框。
 
 ### 脚本应用与解释器自动前置（两平台）
@@ -345,10 +350,22 @@ POSIX 规则（有执行位的文件本就可直接运行，内核会认它的 s
 - `service`/`serve` 都以 supervisor 模式常驻：启动全部应用后保留其句柄，并在命名管道
   `\\.\pipe\AppBootLauncher` 上提供 `app start|stop|restart|status` 控制接口
   （见“进程模型与控制接口”）；`net stop` 只结束服务进程，应用留在系统里。
+  该管道带显式 DACL（创建者/管理员/系统全权，**交互用户读写**），因此普通用户会话的
+  CLI/GUI 能直接控制以 LocalSystem 运行的服务。
 - 服务默认读取 **`<exe 目录>\..\conf\startup.conf`**（`-c` 可覆盖）。
-- 服务以 LocalSystem 运行，启动的应用无交互桌面。
+- 服务以 LocalSystem 运行（session 0），但启动应用时通过 `WTSGetActiveConsoleSessionId`
+  + `WTSQueryUserToken` + `CreateProcessAsUserA` 落入**当前登录用户的桌面会话**——
+  控制台应用无窗口（`CREATE_NO_WINDOW`），GUI 应用正常出现在用户桌面；
+  无活动用户会话时回退普通 `CreateProcess`（POSIX 侧 `serve` 不涉及）。
+- **服务日志自动写入 `<exe 目录>\..\logs\startup.log`**（启动时创建目录；设置环境变量
+  `BOOTLAUNCHER_LOG=<路径>` 可改用任意文件）。日志同时仍输出到 stderr。
+- `install`/`uninstall` 权限不足时自动重新以管理员身份运行自身（UAC 弹窗确认；环境变量
+  `STARTUP_ELEV` 标记防止递归提权；用户取消弹窗则报 -1223）。`uninstall` 先向运行中的
+  服务发停止请求并**等待其真正停止**（最长 10 秒）再 `DeleteService`，避免“只标记删除、
+  服务仍在列表”的假象。
 - 也可用系统命令注册：`sc create AppBootLauncher binPath= "\"D:\...\bin\startup-gcc.exe\" service" start= auto`。
-- 完整生命周期可用 `win32\test\svc_lifecycle.cmd`（以管理员运行）一键验证。
+- 完整生命周期可用 `win32\test\svc_lifecycle.cmd` 一键验证（管理员直接跑；非管理员则
+  install/uninstall 自动走 UAC 提权路径），含“卸载后 `sc query` 必须 1060（彻底消失）”断言。
 - 编码说明：`win32\win32_gui.c` 与 `win32\conf\startup.conf` 保存为 **GBK（代码页 936）**，
   在中文系统上 VC6/MinGW 直接编译/读取即可正确显示中文；改成 UTF-8 会导致 GUI 乱码。
   （`.gitattributes` 已将这两个文件标记为 `binary`，git 不会做行尾/编码转换。）
@@ -403,16 +420,41 @@ cd posix && sh test/run_posix_tests.sh
 #   wsl -u root bash -c "cd /mnt/d/My/DEV/startup/posix && sh test/run_posix_tests.sh"
 ```
 
-20 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
+21 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
 自定义端点的 `serve`，走 `app ping/status/stop/restart/unknown/shutdown` 全序列，
-并验证服务退出后 `app` 命令 rc=3。
+并验证服务退出后 `app` 命令 rc=3；第 11 节验证脚本解释器自动解析（shebang 直启、
+无执行位补 `/bin/sh`、`.py` 补 python3、未知扩展名拒绝启动）。
 
-Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop` 控制接口验证）：
-以管理员运行 `win32\test\svc_lifecycle.cmd`；
-`win32\test\ctl.conf` 配 `serve -s \\.\pipe\...` 可做前台控制接口冒烟。
+Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop` 控制接口验证，
+以及“卸载后服务必须从 SCM 彻底消失（`sc query` 返回 1060）”断言）：
+运行 `win32\test\svc_lifecycle.cmd`（管理员直接跑；非管理员时 install/uninstall
+自动走 UAC 提权路径）；
+`win32\test\ctl.conf` 配 `serve -s \\.\pipe\...` 可做前台控制接口冒烟，
+`win32\test\svc.conf` 用于让已安装服务加载 disposable 测试应用（不碰真实应用）。
 
 ## 已通过的验证
 
+- Win32 服务三问题修复 + GUI 进程控制（本机实测）：
+  - **卸载**：对运行中的服务 `uninstall` 先 ControlService(STOP) 并轮询等待 STOPPED
+    再 DeleteService；非管理员下自动 UAC 提权。实测真实机器上的运行服务：非管理员
+    `uninstall` → `sc query` 返回 1060（彻底删除），随后 `install` 亦经 UAC 成功注册。
+    `svc_lifecycle.cmd` 新增 GONE-OK（1060）断言，管理员模式一次通过。
+  - **纯 GUI 应用**：服务经 `WTSGetActiveConsoleSessionId`+`WTSQueryUserToken`+
+    `CreateProcessAsUserA` 把应用创建到当前用户会话；实测服务（session 0）启动的
+    测试应用 owner=当前用户、session=1。`wtsapi32.dll` 运行时动态加载，VC6 无头文件/
+    导入库依赖。同时修复控制管道的两处：`CreateNamedPipe` 的 SD 必须以
+    `SECURITY_ATTRIBUTES` 包装（裸描述符会被静默忽略——之前普通用户连接报
+    access denied 的根因），显式 DACL 授予交互用户读写；修复后非管理员 CLI/GUI
+    对服务全部控制动词（ping/status/stop/start/restart）实测通过。
+  - **服务日志**：服务进程自动写 `dist\logs\startup.log`（`BOOTLAUNCHER_LOG` 可覆盖）；
+    通过 `putenv`（而非 `SetEnvironmentVariableA`——VC6 CRT 的 `getenv` 看不到后者）注入。
+  - **GUI 子应用进程控制区**：SysListView32（名称/状态/进程号）+ 启动/停止/重启/刷新
+    按钮，走 `STATUS`/`START`/`STOP`/`RESTART` IPC。程序化实测：选中行→点“停止应用”
+    →`app status` 显示 stopped；点“启动应用”→ running 新 pid；点“重启应用”→ 换 pid。
+    截图确认布局完整（窗口调整为 900x830）。
+  - `package_win32.cmd` 不再整目录删除 dist：**现场配置 `dist\conf\startup.conf`
+    永不覆盖**（曾被旧版脚本连带删除导致服务空配置快速退出——已恢复该文件并新增
+    回归断言）；复制失败现在显式报错而非被 `>nul` 吞掉。
 - 命名统一为 **startup**：POSIX 可执行文件 `bootlauncher` → `startup`（Makefile、
   `make install`、unit `contrib/startup.service`、`contrib/S99startup`、测试脚本同步）；
   版本信息中的应用名统一为 `startup`（`version`/`-V`、usage 头行、`PING` 应答
@@ -458,7 +500,8 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 - 发布包布局实测：`dist\bin\*.exe` 从无关 cwd 启动，均正确读取同包 `conf/startup.conf` 并按序启动。
 - Win32 GUI 实测（截图确认）：无参数启动打开窗口；模型载入应用、表单按选中项正确填充（名称/命令行/等待/依赖候选）；程序化点击“校验依赖顺序”→ 状态框打印正确拓扑序；点击“保存配置”→ 生成的文件被核心重新解析且顺序一致（往返闭环）；服务状态查询显示“未安装”。
 - `service` 参数在非 SCM 环境正确拒绝并提示用 `console` 调试。
-- 服务 install 在非管理员下正确报 err=5（权限不足）；管理员下的完整生命周期请用 `win32\test\svc_lifecycle.cmd` 验证。
+- 服务 install 在非管理员下正确报 err=5（权限不足；后已改为自动 UAC 提权重试，见上文
+  “三问题修复”记录）；完整生命周期用 `win32\test\svc_lifecycle.cmd` 验证。
 
 ## 已知限制
 

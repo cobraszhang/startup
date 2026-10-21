@@ -9,8 +9,9 @@
  * Usage:
  *   startup.exe                  open the configuration/status GUI window
  *   startup.exe service          run as a service (dispatched by the SCM)
- *   startup.exe install          create the service (auto start, needs admin)
- *   startup.exe uninstall        remove the service (needs admin)
+ *   startup.exe install          create the service (auto start; if not
+ *   startup.exe uninstall        administrator, both re-run themselves
+ *                                elevated through the UAC prompt)
  *   startup.exe start | stop     control the installed service
  *   startup.exe run | console    run the launcher interactively (debug)
  *   startup.exe help             management subcommands (list/order/add/...)
@@ -19,6 +20,7 @@
  * Compiles with MSVC 6.0 (/TC) and MinGW-w64 gcc -std=c89. C89 only.
  */
 #include <windows.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -164,11 +166,79 @@ int app_build_cmdline(const char *stored, char *out, size_t outsz)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* process spawn helper                                                  */
+/* ------------------------------------------------------------------ */
+
+/* A LocalSystem service lives in session 0; a GUI application it
+ * starts with plain CreateProcessA runs invisibly (session 0
+ * isolation). When the caller holds SeTcbPrivilege (services do), the
+ * application is started inside the ACTIVE CONSOLE session through
+ * that user's token, so windows appear on the logged-in desktop.
+ * Before anybody logs in (early boot) the token lookup fails and we
+ * fall back to the caller's own session - console programs work
+ * either way. In a user session the lookup fails for lack of
+ * privilege and behaviour is unchanged. The WTS entry points are
+ * resolved dynamically: the VC6 SDK predates their headers and older
+ * systems may lack wtsapi32.dll. */
+typedef DWORD (WINAPI *wts_active_session_fn)(void);
+typedef BOOL (WINAPI *wts_query_user_token_fn)(DWORD, HANDLE *);
+
+static int spawn_app(const char *cmdline, PROCESS_INFORMATION *pi)
+{
+    wts_active_session_fn     pActive = (wts_active_session_fn)0;
+    wts_query_user_token_fn   pToken  = (wts_query_user_token_fn)0;
+    static HMODULE            hWts    = NULL;
+    HMODULE                   hK;
+    DWORD                     session = 0xFFFFFFFF;
+    HANDLE                    tok  = NULL, ptok = NULL;
+    STARTUPINFOA              si;
+    BOOL                      ok = FALSE;
+    DWORD                     flags = CREATE_NO_WINDOW |
+                                      CREATE_NEW_PROCESS_GROUP;
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+
+    /* transfer through a union: keeps strict C89 compilers from
+     * warning about function-pointer casts of GetProcAddress */
+    {
+        union { FARPROC raw; wts_active_session_fn fn; } c1;
+        hK = GetModuleHandleA("kernel32.dll");
+        if (hK) {
+            c1.raw = GetProcAddress(hK, "WTSGetActiveConsoleSessionId");
+            pActive = c1.fn;
+        }
+    }
+    if (!hWts) hWts = LoadLibraryA("wtsapi32.dll");
+    if (hWts) {
+        union { FARPROC raw; wts_query_user_token_fn fn; } c2;
+        c2.raw = GetProcAddress(hWts, "WTSQueryUserToken");
+        pToken = c2.fn;
+    }
+
+    if (pActive) session = pActive();
+    if (pToken && session != 0xFFFFFFFF && pToken(session, &tok) &&
+        DuplicateTokenEx(tok, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE |
+                         TOKEN_QUERY, NULL, SecurityImpersonation,
+                         TokenPrimary, &ptok))
+        ok = CreateProcessAsUserA(ptok, NULL, (LPSTR)cmdline,
+                                  NULL, NULL, FALSE, flags,
+                                  NULL, NULL, &si, pi);
+    if (tok)  CloseHandle(tok);
+    if (ptok) CloseHandle(ptok);
+
+    if (!ok)
+        ok = CreateProcessA(NULL, (LPSTR)cmdline, NULL, NULL, FALSE,
+                            flags, NULL, NULL, &si, pi);
+    return ok ? 0 : (int)GetLastError();
+}
+
 static int launch_app(const app_t *a)
 {
-    STARTUPINFOA si;
     PROCESS_INFORMATION pi;
     char cmdline[CMD_MAX];
+    int  rc;
 
     if (app_build_cmdline(a->cmd, cmdline, sizeof(cmdline)) != 0) {
         log_msg("launch: no interpreter available for '%s' (cmd='%s')",
@@ -176,15 +246,11 @@ static int launch_app(const app_t *a)
         return -1;
     }
 
-    memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
-
-    if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-                        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
-                        NULL, NULL, &si, &pi)) {
-        log_msg("launch: FAILED '%s' (cmd='%s') err=%lu",
-                a->name, a->cmd, (unsigned long)GetLastError());
+    rc = spawn_app(cmdline, &pi);
+    if (rc != 0) {
+        log_msg("launch: FAILED '%s' (cmd='%s') err=%d",
+                a->name, a->cmd, rc);
         return -1;
     }
     log_msg("launch: started '%s' pid=%lu",
@@ -289,9 +355,9 @@ static int sup_load(const char *confpath)
 
 static int sup_launch(int i)
 {
-    STARTUPINFOA si;
     PROCESS_INFORMATION pi;
     char cmdline[CMD_MAX];
+    int  rc;
 
     if (app_build_cmdline(g_sapps[i].cmd, cmdline, sizeof(cmdline)) != 0) {
         log_msg("sup: no interpreter available for '%s' (cmd='%s')",
@@ -299,16 +365,11 @@ static int sup_launch(int i)
         return -1;
     }
 
-    memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
-
-    if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-                        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
-                        NULL, NULL, &si, &pi)) {
-        log_msg("sup: start '%s' failed (cmd='%s') err=%lu",
-                g_sapps[i].name, g_sapps[i].cmd,
-                (unsigned long)GetLastError());
+    rc = spawn_app(cmdline, &pi);
+    if (rc != 0) {
+        log_msg("sup: start '%s' failed (cmd='%s') err=%d",
+                g_sapps[i].name, g_sapps[i].cmd, rc);
         return -1;
     }
     CloseHandle(pi.hThread);
@@ -552,6 +613,29 @@ void default_conf_path(const char *exepath, char *out, size_t outsz)
     }
 }
 
+static void setup_service_logging(const char *exe)
+{
+    char  dir[MAX_PATH * 2];
+    char *slash;
+    static char envbuf[MAX_PATH * 2 + 24];
+
+    if (getenv("BOOTLAUNCHER_LOG")) return;      /* explicit wins */
+    strncpy(dir, exe, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    slash = strrchr(dir, '\\');
+    if (!slash) return;
+    *slash = '\0';
+    if (strlen(dir) + 20 >= sizeof(dir)) return;
+    strcat(dir, "\\..\\logs");
+    CreateDirectoryA(dir, NULL);
+    strcat(dir, "\\startup.log");
+    /* putenv (not SetEnvironmentVariableA): the C runtime getenv used
+     * by log.c only sees the CRT's own environment block */
+    strcpy(envbuf, "BOOTLAUNCHER_LOG=");
+    strcat(envbuf, dir);
+    putenv(envbuf);
+}
+
 static void WINAPI service_main(DWORD argc, char **argv)
 {
     char conf[MAX_PATH * 2];
@@ -571,6 +655,10 @@ static void WINAPI service_main(DWORD argc, char **argv)
     report_status(SERVICE_START_PENDING, START_WAIT_MS);
 
     GetModuleFileNameA(NULL, exe, MAX_PATH);
+    /* no console in session 0: keep the supervisor log in a file
+     * next to the configuration (dist\logs\startup.log) unless the
+     * BOOTLAUNCHER_LOG environment variable selects another path */
+    setup_service_logging(exe);
     default_conf_path(exe, conf, sizeof(conf));
     log_msg("service: startup " APPBOOT_VERSION
             ", configuration file: %s", conf);
@@ -611,19 +699,79 @@ static void WINAPI service_main(DWORD argc, char **argv)
 /* install / uninstall / start / stop helpers                           */
 /* ------------------------------------------------------------------ */
 
+/* Run this same executable once more with administrator rights
+ * (ShellExecute "runas" shows the UAC prompt). Waits for the elevated
+ * child and returns its exit code, or a negative Win32 error when the
+ * launch itself failed (1223 = the user declined the prompt). */
+static int run_elevated(const char *args)
+{
+    SHELLEXECUTEINFOA se;
+    char exe[MAX_PATH];
+
+    GetModuleFileNameA(NULL, exe, (DWORD)sizeof(exe));
+    memset(&se, 0, sizeof(se));
+    se.cbSize       = sizeof(se);
+    se.fMask        = SEE_MASK_NOCLOSEPROCESS;
+    se.lpVerb       = "runas";
+    se.lpFile       = exe;
+    se.lpParameters = args;
+    se.nShow        = SW_HIDE;
+    if (!ShellExecuteExA(&se))
+        return -(int)GetLastError();
+    if (se.hProcess) {
+        DWORD rc = 1;
+        WaitForSingleObject(se.hProcess, 30000);
+        GetExitCodeProcess(se.hProcess, &rc);
+        CloseHandle(se.hProcess);
+        return (int)rc;
+    }
+    return 0;
+}
+
+/* One-shot elevation retry for install/uninstall. The child carries a
+ * marker environment variable so an already-elevated attempt that still
+ * hits ACCESS_DENIED reports its error instead of looping. */
+static int svc_elevated(const char *what)
+{
+    int rc;
+
+    log_msg("%s: needs administrator rights; retrying elevated "
+            "(please confirm the UAC prompt)...", what);
+    /* putenv keeps the C runtime and the Win32 environment in sync:
+     * the child needs the marker, and "NAME=" removes it afterwards */
+    putenv((char *)"STARTUP_ELEV=1");
+    rc = run_elevated(what);
+    putenv((char *)"STARTUP_ELEV=");
+    if (rc == 0) {
+        log_msg("%s: completed elevated", what);
+        return 0;
+    }
+    if (rc == -1223)
+        log_msg("%s: elevation declined by the user", what);
+    else
+        log_msg("%s: elevated attempt failed (rc=%d)", what, rc);
+    return 1;
+}
+
 int svc_control(const char *what, int needs_create)
 {
     SC_HANDLE scm = NULL, svc = NULL;
+    DWORD     err = 0;
     int ok = 0;
+    /* manage commands may retry once through UAC */
+    int manage  = (strcmp(what, "install") == 0 ||
+                   strcmp(what, "uninstall") == 0);
+    int already = getenv("STARTUP_ELEV") != NULL;
 
     scm = OpenSCManagerA(NULL, NULL,
                          needs_create ? SC_MANAGER_ALL_ACCESS
-                                      : SERVICE_QUERY_STATUS | SERVICE_START |
-                                        SERVICE_STOP | SERVICE_QUERY_CONFIG |
-                                        DELETE);
+                                      : SC_MANAGER_CONNECT);
     if (!scm) {
+        err = GetLastError();
+        if (manage && !already && err == ERROR_ACCESS_DENIED)
+            return svc_elevated(what);
         log_msg("%s: OpenSCManager failed err=%lu", what,
-                (unsigned long)GetLastError());
+                (unsigned long)err);
         return 1;
     }
 
@@ -643,35 +791,66 @@ int svc_control(const char *what, int needs_create)
             log_msg("%s: service '%s' created (auto start)", what, SERVICE_NAME);
             ok = 1;
             CloseServiceHandle(svc);
+        } else {
+            err = GetLastError();
         }
     } else {
         svc = OpenServiceA(scm, SERVICE_NAME,
-                           strcmp(what, "uninstall") == 0 ? DELETE
+                           strcmp(what, "uninstall") == 0
+                               ? DELETE | SERVICE_STOP | SERVICE_QUERY_STATUS
                                                          : SERVICE_START | SERVICE_STOP);
         if (svc) {
             if (strcmp(what, "uninstall") == 0) {
+                /* DeleteService on a RUNNING service only marks it for
+                 * deletion: it keeps running and stays listed until it
+                 * exits. Stop it first (bounded wait), then delete. */
+                SERVICE_STATUS st;
+                int waited = 0;
+                if (QueryServiceStatus(svc, &st) &&
+                    st.dwCurrentState != SERVICE_STOPPED) {
+                    ControlService(svc, SERVICE_CONTROL_STOP, &st);
+                    while (waited < 10000 &&
+                           QueryServiceStatus(svc, &st) &&
+                           st.dwCurrentState != SERVICE_STOPPED) {
+                        Sleep(200);
+                        waited += 200;
+                    }
+                }
                 if (DeleteService(svc)) {
                     log_msg("%s: service '%s' removed", what, SERVICE_NAME);
                     ok = 1;
+                } else {
+                    err = GetLastError();
                 }
             } else if (strcmp(what, "start") == 0) {
                 if (StartServiceA(svc, 0, NULL)) {
                     log_msg("%s: service started", what);
                     ok = 1;
+                } else {
+                    err = GetLastError();
                 }
             } else { /* stop */
                 SERVICE_STATUS st;
                 if (ControlService(svc, SERVICE_CONTROL_STOP, &st)) {
                     log_msg("%s: service stopped", what);
                     ok = 1;
+                } else {
+                    err = GetLastError();
                 }
             }
             CloseServiceHandle(svc);
+        } else {
+            err = GetLastError();
         }
     }
 
+    if (!ok && manage && !already && err == ERROR_ACCESS_DENIED) {
+        CloseServiceHandle(scm);
+        return svc_elevated(what);
+    }
+
     if (!ok)
-        log_msg("%s: failed err=%lu", what, (unsigned long)GetLastError());
+        log_msg("%s: failed err=%lu", what, (unsigned long)err);
     CloseServiceHandle(scm);
     return ok ? 0 : 1;
 }

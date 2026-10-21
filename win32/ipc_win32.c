@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "ipc.h"
+#include "log.h"
 
 struct ipc_conn { HANDLE h; };
 
@@ -64,14 +65,55 @@ void ipc_client_close(ipc_conn *c)
 
 /* ---------------- server ---------------- */
 
+/* A service runs as LocalSystem; the default pipe DACL from its token
+ * does NOT grant access to interactive users, so user-session clients
+ * get "access denied". Build an explicit DACL: creator, administrators
+ * and the system keep full control, interactive users get read+write. */
+#ifndef SDDL_REVISION_1
+#define SDDL_REVISION_1 1
+#endif
+#ifdef __GNUC__
+#include <sddl.h>          /* MinGW declares the SDDL helper here */
+#else
+/* VC6 SDK headers do not declare it */
+BOOL WINAPI ConvertStringSecurityDescriptorToSecurityDescriptorA(
+    LPCSTR, DWORD, PSECURITY_DESCRIPTOR *, PDWORD);
+#endif
+
+static PSECURITY_DESCRIPTOR server_sd(void)
+{
+    static PSECURITY_DESCRIPTOR sd = NULL;
+    if (!sd) {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+                "D:P(A;;GA;;;CO)(A;;GA;;;BA)(A;;GA;;;SY)(A;;GRGW;;;IU)",
+                SDDL_REVISION_1, &sd, NULL)) {
+            log_msg("ipc: pipe security descriptor conversion failed err=%lu",
+                    (unsigned long)GetLastError());
+            sd = (PSECURITY_DESCRIPTOR)-1;   /* remember the failure */
+        }
+    }
+    return sd == (PSECURITY_DESCRIPTOR)-1 ? NULL : sd;
+}
+
 void *ipc_server_open(const char *endpoint)
 {
-    HANDLE h = CreateNamedPipeA(endpoint,
+    SECURITY_ATTRIBUTES sa;
+    PSECURITY_DESCRIPTOR sd = server_sd();
+    HANDLE h;
+
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle = FALSE;
+
+    /* NOTE: the last CreateNamedPipe argument is a SECURITY_ATTRIBUTES,
+     * not a bare security descriptor: passing the descriptor directly
+     * compiles (void*) but is silently ignored at runtime. */
+    h = CreateNamedPipeA(endpoint,
         PIPE_ACCESS_DUPLEX,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
         1,                      /* one instance; clients serialise */
         4096, 4096,
-        0, NULL);
+        0, sd ? &sa : NULL);
     if (h == INVALID_HANDLE_VALUE) return NULL;
     return (void *)h;
 }
