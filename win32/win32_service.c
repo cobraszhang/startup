@@ -699,6 +699,38 @@ static void WINAPI service_main(DWORD argc, char **argv)
 /* install / uninstall / start / stop helpers                           */
 /* ------------------------------------------------------------------ */
 
+/* Vista+ "Automatic (Delayed Start)": the SCM finishes ALL normal
+ * auto-start services first, then starts this one - as part of the boot
+ * flow, before any interactive user logs in. Manual 'start' is
+ * unaffected. VC6 headers do not carry this info level. */
+#ifndef SERVICE_CONFIG_DELAYED_AUTO_START_INFO
+#define SERVICE_CONFIG_DELAYED_AUTO_START_INFO 3
+#endif
+typedef struct { BOOL fDelayedAutostart; } delayed_autostart_t;
+
+static void set_delayed_autostart(SC_HANDLE svc)
+{
+    delayed_autostart_t  want;
+    BYTE                 buf[64];
+    DWORD                need = 0;
+
+    want.fDelayedAutostart = TRUE;
+    if (!ChangeServiceConfig2A(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+                               &want)) {
+        log_msg("install: could not enable delayed auto-start err=%lu",
+                (unsigned long)GetLastError());
+        return;
+    }
+    if (QueryServiceConfig2A(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+                             buf, sizeof(buf), &need) &&
+        need >= sizeof(delayed_autostart_t) &&
+        ((delayed_autostart_t *)buf)->fDelayedAutostart)
+        log_msg("install: boot start deferred until all auto-start "
+                "services are up (delayed auto-start)");
+    else
+        log_msg("install: WARNING: delayed auto-start not confirmed");
+}
+
 /* Run this same executable once more with administrator rights
  * (ShellExecute "runas" shows the UAC prompt). Waits for the elevated
  * child and returns its exit code, or a negative Win32 error when the
@@ -788,7 +820,9 @@ int svc_control(const char *what, int needs_create)
                              SERVICE_ERROR_NORMAL,
                              binpath, NULL, NULL, NULL, NULL, NULL);
         if (svc) {
-            log_msg("%s: service '%s' created (auto start)", what, SERVICE_NAME);
+            set_delayed_autostart(svc);
+            log_msg("%s: service '%s' created (auto start, delayed)",
+                    what, SERVICE_NAME);
             ok = 1;
             CloseServiceHandle(svc);
         } else {

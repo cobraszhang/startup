@@ -295,7 +295,7 @@ Makefile 会自动加 `-DHAVE_GUI` 编译 `gui_gtk.c` 并链接 GTK（其 includ
 win32\build\release\startup-gcc.exe                  :: 无参数：打开 GUI 配置/状态窗口
 win32\build\release\startup-gcc.exe service          :: 服务入口（SCM 用；install 时自动写入 binPath）
 win32\build\release\startup-gcc.exe serve            :: 前台 supervisor（不注册服务，也有控制接口）
-win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动启动；非管理员自动 UAC 提权）
+win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动-延迟启动：所有自启动服务完成后、登录前拉起；非管理员自动 UAC 提权）
 win32\build\release\startup-gcc.exe start | stop | uninstall   :: uninstall 会先停服务并等待其停止再真正删除
 win32\build\release\startup-gcc.exe run | console -c test\order.conf   :: 不装服务，直接在控制台调试
 win32\build\release\startup-gcc.exe help             :: 管理子命令列表（见上文“命令行管理接口”）
@@ -347,6 +347,10 @@ POSIX 规则（有执行位的文件本就可直接运行，内核会认它的 s
 无运行时拒绝）。
 
 - 服务注册的 binPath 为 `"<exe>" service`，开机由 SCM 带 `service` 参数拉起。
+- **开机启动被刻意推迟**：install 会把服务设为“自动(延迟启动)”
+  （`ChangeServiceConfig2` + `SERVICE_CONFIG_DELAYED_AUTO_START_INFO`）。SCM 先完成全部
+  普通自启动服务的启动，**开机流程收尾时才拉起本服务**（仍在任何用户登录之前），不与
+  其他服务争抢启动资源；手动 `start` / GUI“启动服务”不受影响，随时可用。
 - `service`/`serve` 都以 supervisor 模式常驻：启动全部应用后保留其句柄，并在命名管道
   `\\.\pipe\AppBootLauncher` 上提供 `app start|stop|restart|status` 控制接口
   （见“进程模型与控制接口”）；`net stop` 只结束服务进程，应用留在系统里。
@@ -363,7 +367,8 @@ POSIX 规则（有执行位的文件本就可直接运行，内核会认它的 s
   `STARTUP_ELEV` 标记防止递归提权；用户取消弹窗则报 -1223）。`uninstall` 先向运行中的
   服务发停止请求并**等待其真正停止**（最长 10 秒）再 `DeleteService`，避免“只标记删除、
   服务仍在列表”的假象。
-- 也可用系统命令注册：`sc create AppBootLauncher binPath= "\"D:\...\bin\startup-gcc.exe\" service" start= auto`。
+- 也可用系统命令注册：`sc create AppBootLauncher binPath= "\"D:\...\bin\startup-gcc.exe\" service" start= auto` 然后
+  `sc config AppBootLauncher start= delayed-auto`（延迟启动）。
 - 完整生命周期可用 `win32\test\svc_lifecycle.cmd` 一键验证（管理员直接跑；非管理员则
   install/uninstall 自动走 UAC 提权路径），含“卸载后 `sc query` 必须 1060（彻底消失）”断言。
 - 编码说明：`win32\win32_gui.c` 与 `win32\conf\startup.conf` 保存为 **GBK（代码页 936）**，
@@ -434,6 +439,11 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 
 ## 已通过的验证
 
+- **开机启动次序**：install 自动把服务设为“自动(延迟启动)”——SCM 完成全部普通自启动
+  服务后才拉起本服务（属开机流程，先于任何用户登录；手动 start 不受影响）。实测
+  install 后 `QueryServiceConfig2` 回读 `fDelayedAutostart=TRUE`，日志打印确认；
+  随后 uninstall 仍 1060 彻底删除。注意：延迟信息不显示在 `sc qc` 的 START_TYPE 里
+  （仍标 AUTO_START），在 services.msc 中显示为“自动(延迟启动)”。
 - Win32 服务三问题修复 + GUI 进程控制（本机实测）：
   - **卸载**：对运行中的服务 `uninstall` 先 ControlService(STOP) 并轮询等待 STOPPED
     再 DeleteService；非管理员下自动 UAC 提权。实测真实机器上的运行服务：非管理员
