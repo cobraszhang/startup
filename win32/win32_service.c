@@ -143,19 +143,57 @@ int run_all(const char *confpath)
 /* service entry                                                        */
 /* ------------------------------------------------------------------ */
 
-/* Default configuration: <exe dir>\..\conf\startup.conf */
+/* Default configuration: prefer <exe dir>\..\conf\startup.conf
+ * (release layout). If it does not exist, try
+ * <exe dir>\..\..\conf\startup.conf so development builds placed in
+ * build\debug or build\release resolve the repository conf\ directory.
+ * If neither exists, report the standard release-layout path. */
+#define CONF_SUBPATH   "..\\conf\\startup.conf"
+#define CONF_SUBPATH2  "..\\..\\conf\\startup.conf"
+
+static int conf_file_exists(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
 void default_conf_path(const char *exepath, char *out, size_t outsz)
 {
-    char  *slash;
-    size_t len;
+    char  base[1024];
+    char  cand[1120];
+    char *slash;
 
+    strncpy(base, exepath, sizeof(base) - 1);
+    base[sizeof(base) - 1] = '\0';
+    slash = strrchr(base, '\\');
+    if (!slash) slash = strrchr(base, '/');
+    if (slash) *slash = '\0';
+
+    if (strlen(base) + 1 + strlen(CONF_SUBPATH) < sizeof(cand)) {
+        sprintf(cand, "%s\\%s", base, CONF_SUBPATH);
+        if (conf_file_exists(cand)) {
+            strncpy(out, cand, outsz - 1);
+            out[outsz - 1] = '\0';
+            return;
+        }
+        if (strlen(base) + 1 + strlen(CONF_SUBPATH2) < sizeof(cand)) {
+            sprintf(cand, "%s\\%s", base, CONF_SUBPATH2);
+            if (conf_file_exists(cand)) {
+                strncpy(out, cand, outsz - 1);
+                out[outsz - 1] = '\0';
+                return;
+            }
+        }
+    }
+    /* nothing present: keep the documented default for error messages */
     strncpy(out, exepath, outsz - 1);
     out[outsz - 1] = '\0';
     slash = strrchr(out, '\\');
     if (!slash) slash = strrchr(out, '/');
     if (slash) *slash = '\0';
-    len = strlen(out);
-    if (len + 1 + strlen(CONF_SUBPATH) < outsz) {
+    if (strlen(out) + 1 + strlen(CONF_SUBPATH) < outsz) {
         strcat(out, "\\");
         strcat(out, CONF_SUBPATH);
     } else {

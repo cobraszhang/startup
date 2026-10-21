@@ -7,19 +7,19 @@ rem at a probe app that records the service actually ran
 echo [svctest]> conf\startup.conf
 echo cmd = cmd.exe /c echo via-service ^>^> %CD%\build\svctest.txt>> conf\startup.conf
 echo === install ===
-build\startup-gcc.exe install
+build\release\startup-gcc.exe install
 echo rc=%ERRORLEVEL%
 echo === start ===
-build\startup-gcc.exe start
+build\release\startup-gcc.exe start
 echo rc=%ERRORLEVEL%
 timeout /t 3 /nobreak >nul
 echo === query ===
 sc query AppBootLauncher
 echo === stop ===
-build\startup-gcc.exe stop
+build\release\startup-gcc.exe stop
 echo rc=%ERRORLEVEL%
 echo === uninstall ===
-build\startup-gcc.exe uninstall
+build\release\startup-gcc.exe uninstall
 echo rc=%ERRORLEVEL%
 del conf\startup.conf
 endlocal

@@ -102,6 +102,15 @@ static void exe_dir(const char *argv0, char *out, size_t outsz)
     else       strcpy(out, ".");
 }
 
+/* can the file be opened for reading? */
+static int conf_readable(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
 /* detach from the controlling terminal: classic double fork */
 static void daemonize(void)
 {
@@ -202,15 +211,36 @@ int main(int argc, char **argv)
         strncpy(chosen, conf, sizeof(chosen) - 1);
         chosen[sizeof(chosen) - 1] = '\0';
     } else {
-        /* default: <exe dir>/../conf/startup.conf */
+        /* Default: <exe dir>/../conf/startup.conf (release / installed
+         * layout). Development builds live one level deeper
+         * (build/debug, build/release), so also try
+         * <exe dir>/../../conf/startup.conf. If neither exists, keep
+         * the documented default path for the error message. */
+        static const char *suffixes[] = {
+            "/../conf/startup.conf",
+            "/../../conf/startup.conf"
+        };
+        int k;
+
         exe_dir(argv[0], exedir, sizeof(exedir));
-        if (strlen(exedir) + strlen("/../conf/startup.conf") + 1
-                >= sizeof(chosen)) {
-            log_msg("executable path too long to derive config path");
-            return 2;
+        chosen[0] = '\0';
+        for (k = 0; k < 2; k++) {
+            if (strlen(exedir) + strlen(suffixes[k]) + 1
+                    < sizeof(chosen)) {
+                strcpy(chosen, exedir);
+                strcat(chosen, suffixes[k]);
+                if (conf_readable(chosen)) break;
+            }
         }
-        strcpy(chosen, exedir);
-        strcat(chosen, "/../conf/startup.conf");
+        if (!chosen[0] || !conf_readable(chosen)) {
+            if (strlen(exedir) + strlen(suffixes[0]) + 1
+                    >= sizeof(chosen)) {
+                log_msg("executable path too long to derive config path");
+                return 2;
+            }
+            strcpy(chosen, exedir);
+            strcat(chosen, suffixes[0]);
+        }
     }
 
     if (optind < argc) {

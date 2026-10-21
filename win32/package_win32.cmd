@@ -13,8 +13,8 @@ call "%ROOT%build_win32.cmd" || exit /b 1
 if exist "%DIST%" rmdir /s /q "%DIST%"
 mkdir "%DIST%\bin"
 mkdir "%DIST%\conf"
-copy /y "%ROOT%build\startup-gcc.exe" "%DIST%\bin\" >nul
-copy /y "%ROOT%build\startup-cl.exe"  "%DIST%\bin\" >nul
+copy /y "%ROOT%build\release\startup-gcc.exe" "%DIST%\bin\" >nul
+copy /y "%ROOT%build\release\startup-cl.exe"  "%DIST%\bin\" >nul
 copy /y "%ROOT%conf\startup.conf"     "%DIST%\conf\" >nul
 copy /y "%ROOT%..\README.md"          "%DIST%\README.md" >nul
 
