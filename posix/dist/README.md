@@ -31,7 +31,9 @@ win32/              Win32 平台源文件与工程文件
 
 posix/              *nix 平台源文件与工程文件
   posix_main.c        开机/CLI 入口（fork + /bin/sh -c，可 -d 后台化）
-  Makefile            构建（make / make install / make package）
+  gui_gtk.c           GTK+3 图形配置窗口（有桌面会话时无参数自动打开）
+  posix_app.h         入口与 GUI 共用的内部接口
+  Makefile            构建（自动探测 pkg-config gtk+-3.0，有则编入 GUI）
   conf\startup.conf   POSIX 样例配置（make install 装到 /usr/local/conf）
   contrib\            systemd unit 与 SysV init 脚本样例
   test\               POSIX 测试配置与 run_posix_tests.sh
@@ -118,6 +120,8 @@ dep del <a> <b>          删除该依赖
 help                     子命令帮助
 ```
 
+> `gui`（仅 POSIX 且构建时带 GTK）：强制打开图形配置窗口，不在共享 `cli.c` 子命令表内。
+
 Windows（`-c` 可出现在任意位置；无参数仍打开 GUI）：
 
 ```bat
@@ -162,6 +166,11 @@ make            # cc -std=c89 -pedantic -Wall -Wextra -O2 -> build/bootlauncher
 make install    # 安装到 /usr/local/bin 并复制样例配置到 /usr/local/conf
 ```
 
+若系统装有 GTK+3 开发文件（`pkg-config gtk+-3.0`，如 `apt install libgtk-3-dev`），
+Makefile 会自动加 `-DHAVE_GUI` 编译 `gui_gtk.c` 并链接 GTK（其 include 以
+`-isystem` 引入，第三方头文件不会污染 `-std=c89 -pedantic` 的零警告要求）；
+未安装则退化为纯命令行/开机版本，其余行为不变。
+
 已在 WSL Ubuntu 24.04 (gcc 13) 下验证零警告编译与全部行为。
 
 ## Win32 用法
@@ -189,10 +198,39 @@ GUI 窗口功能（结构化编辑每个参数）：
 - 服务默认读取 **`<exe 目录>\..\conf\startup.conf`**（`-c` 可覆盖）。
 - 服务以 LocalSystem 运行，启动的应用无交互桌面。
 - 也可用系统命令注册：`sc create AppBootLauncher binPath= "\"D:\...\bin\startup-gcc.exe\" service" start= auto`。
-- 完整生命周期可用 `test\svc_lifecycle.cmd`（以管理员运行）一键验证。
+- 完整生命周期可用 `win32\test\svc_lifecycle.cmd`（以管理员运行）一键验证。
 - 编码说明：`win32\win32_gui.c` 与 `win32\conf\startup.conf` 保存为 **GBK（代码页 936）**，
   在中文系统上 VC6/MinGW 直接编译/读取即可正确显示中文；改成 UTF-8 会导致 GUI 乱码。
   （`.gitattributes` 已将这两个文件标记为 `binary`，git 不会做行尾/编码转换。）
+
+## POSIX 图形配置窗口（GTK+3）
+
+与 Windows 版对齐：无参数启动打开图形配置窗口，但先检测桌面会话——
+
+1. 检测到 **GNOME 会话**（`XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP` 含 gnome）→ 打开 GUI；
+2. 否则若存在任意显示服务（`WAYLAND_DISPLAY` 或 `DISPLAY`，**WSLg 即此情形**）→ 尝试打开 GUI
+   （连不上显示时 `gtk_init_check` 失败，自动退回第 3 条）；
+3. 都没有（服务器开机、systemd/SysV/rc.local 环境）→ 保持原开机行为，按序启动应用；
+4. `-d` 守护模式与任何子命令都不触发 GUI；`gui` 子命令可无条件强制打开。
+
+GUI 功能与 Win32 版一致（复用同一套 `cfg_*`/`topo_sort`，保存产物字节级一致）：
+应用列表（新增/删除）、每个参数一个控件（名称、命令行、等待毫秒、依赖 Ctrl/Shift
+多选）、改名跟随引用、删除清除悬空引用、保存配置、校验依赖顺序、按序启动应用、
+核心日志重定向到状态框。服务安装/控制是 Win32 特有（Linux 由 systemd 管理），无此按钮。
+
+测试辅助环境变量（无需人工点击）：
+
+```sh
+# 脚本化自检：载入模型、验证依赖预选、跑拓扑校验；状态行镜像到 stderr
+APPBOOT_GUI_SELFTEST=1 APPBOOT_GUI_EXPECT_N=3 ./build/bootlauncher -c cfg.conf gui
+
+# 自截图：窗口映射 0.8s 后用 cairo 渲染保存 PNG 并退出（X11/Wayland 后端都可用）
+APPBOOT_GUI_SHOT=/tmp/gui.png ./build/bootlauncher -c cfg.conf
+```
+
+> WSLg：Windows 11 的 WSL 自带 Wayland/X11（`DISPLAY=:0`），`posix/build/gui-gtk.png`
+> 即此方式截得的验证图。WSL 内没有 GNOME 会话，走的是第 2 条检测路径；WSLg 桥接没有
+> 物理键盘 seat，gdk 会打印两条无害的 `gdk_seat_get_keyboard` CRITICAL，可忽略。
 
 ## POSIX 开机自启
 
@@ -215,21 +253,28 @@ Win32 服务完整生命周期：以管理员运行 `win32\test\svc_lifecycle.cm
 
 ## 已通过的验证
 
+- WSL Ubuntu 24.04 (gcc 13) + WSLg 实测 GTK+3 版：`-std=c89 -pedantic` 零警告编译（GTK 头走
+  `-isystem`）；`gui` 子命令与无参数自动检测（Wayland/X11 路径）均正确打开窗口；
+  自截图确认窗口完整渲染（中文标签、列表、表单、依赖多选预选、状态框载入 3 应用）；
+  脚本化自检（载入 + 依赖预选 + 拓扑校验）通过；`APPBOOT_GUI_SHOT` cairo 自截图在 Wayland
+  后端可用（服务端像素回读不可用，故不用截屏工具）。
+- `wsl -u root` 下 `posix/test/run_posix_tests.sh` **16/16 通过**（新增第 9 项 GTK GUI 自检；
+  开机类用例显式 `env -u DISPLAY -u WAYLAND_DISPLAY` 以覆盖“无桌面=开机模式”语义）。
 - 目录整理（共享 src/，win32/、posix/ 各带源文件+工程文件，产物在 <平台>/build，发布在 <平台>/dist/bin）后全量重验：
   - `win32\build_win32.cmd` 双编译器零警告，产出到 `win32\build\`；
   - `win32\build\startup-gcc.exe order` 不带 `-c` 正确解析 `win32\build\..\conf\startup.conf`（即 `win32\conf\`），两个 exe 一致；
-  - `wsl -u root` 下 `cd posix && sh test/run_posix_tests.sh` **15/15 通过**（新 Makefile/新测试路径）；
+  - `wsl -u root` 下 `cd posix && sh test/run_posix_tests.sh` **16/16 通过**（新 Makefile/新测试路径，含 GTK GUI 自检）；
   - GUI 无参数启动正确读取新位置样例配置（截图确认）；
   - 发布包重新生成：`win32\dist\bin\*.exe`、`posix/dist/bin/bootlauncher`（含 `dist/conf`）。
 - 双编译器（MinGW-w64 gcc 16.2 / MSVC 6.0 SP6）构建 Win32 版，零警告。
 - gcc `-std=c89 -pedantic` 构建 POSIX 版，零警告。
 - 乱序配置 → 实际按 first→second→third 启动（落盘证实），两个 exe 均通过（`win32/test/order.conf`、`posix/test/order.conf`）。
 - 环检测（`cycle.conf`）与未知依赖（`baddep.conf`）：报错并列出问题应用，退出码非 0（两平台）。
-- POSIX 测试套件 15 项：构建、前台顺序、环、未知依赖、`-d` 守护模式、`make install`（装到 `/usr/local/conf`）、systemd unit（`systemctl start` 后按序落盘）、**exe 相对 `../conf` 默认路径解析**、**CLI 管理接口 7 项**（list、order、add/set/dep/rename 往返、check 环检测与修复、run 应用编辑后的配置真实按新序启动、rm 清除引用、错误退出码）。
+- POSIX 测试套件 16 项：构建、前台顺序、环、未知依赖、`-d` 守护模式、`make install`（装到 `/usr/local/conf`）、systemd unit（`systemctl start` 后按序落盘）、**exe 相对 `../conf` 默认路径解析**、**CLI 管理接口 7 项**（list、order、add/set/dep/rename 往返、check 环检测与修复、run 应用编辑后的配置真实按新序启动、rm 清除引用、错误退出码）、**GTK GUI 自检**（模型载入、依赖预选计数、拓扑校验输出）。
 - Win32 CLI 实测（两个 exe）：完整序列 `list/order/check/add/set/dep/rename` 正确；rename 后其他应用依赖引用跟随；人为制造环 → `check` 报错 rc=1，`dep del` 后恢复 OK；未知命令 rc=2 并打印完整用法。
 - SysV 脚本 `/etc/init.d/bootlauncher start` 按序启动验证通过。
 - 发布包布局实测：`dist\bin\*.exe` 从无关 cwd 启动，均正确读取同包 `conf/startup.conf` 并按序启动。
-- GUI 实测（截图确认）：无参数启动打开窗口；模型载入应用、表单按选中项正确填充（名称/命令行/等待/依赖候选）；程序化点击“校验依赖顺序”→ 状态框打印正确拓扑序；点击“保存配置”→ 生成的文件被核心重新解析且顺序一致（往返闭环）；服务状态查询显示“未安装”。
+- Win32 GUI 实测（截图确认）：无参数启动打开窗口；模型载入应用、表单按选中项正确填充（名称/命令行/等待/依赖候选）；程序化点击“校验依赖顺序”→ 状态框打印正确拓扑序；点击“保存配置”→ 生成的文件被核心重新解析且顺序一致（往返闭环）；服务状态查询显示“未安装”。
 - `service` 参数在非 SCM 环境正确拒绝并提示用 `console` 调试。
 - 服务 install 在非管理员下正确报 err=5（权限不足）；管理员下的完整生命周期请用 `win32\test\svc_lifecycle.cmd` 验证。
 

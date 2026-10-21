@@ -33,20 +33,21 @@ report "build" $?
 
 echo "== 2. dependency order (foreground) =="
 rm -f "$ORDER_OUT"
-./build/bootlauncher -c test/order.conf >/tmp/posix-t1.log 2>&1
+# plain boot mode: explicitly headless (with WSLg a plain call opens the GUI)
+env -u DISPLAY -u WAYLAND_DISPLAY ./build/bootlauncher -c test/order.conf >/tmp/posix-t1.log 2>&1
 rc=$?
 sleep 1   # children are detached; give the last one time to append
 if [ "$rc" = 0 ] && check_order_file; then ok=0; else ok=1; fi
 report "start order first->second->third" $ok
 
 echo "== 3. dependency cycle rejection =="
-./build/bootlauncher -c test/cycle.conf >/tmp/posix-t2.log 2>&1
+env -u DISPLAY -u WAYLAND_DISPLAY ./build/bootlauncher -c test/cycle.conf >/tmp/posix-t2.log 2>&1
 rc=$?
 if [ "$rc" != 0 ] && grep -q 'dependency cycle' /tmp/posix-t2.log; then ok=0; else ok=1; fi
 report "cycle detected and startup aborted" $ok
 
 echo "== 4. unknown dependency rejection =="
-./build/bootlauncher -c test/baddep.conf >/tmp/posix-t3.log 2>&1
+env -u DISPLAY -u WAYLAND_DISPLAY ./build/bootlauncher -c test/baddep.conf >/tmp/posix-t3.log 2>&1
 rc=$?
 if [ "$rc" != 0 ] && grep -q "unknown app 'ghost'" /tmp/posix-t3.log; then ok=0; else ok=1; fi
 report "unknown dependency detected" $ok
@@ -90,7 +91,7 @@ rm -rf "$LT" && mkdir -p "$LT/bin" "$LT/conf"
 cp build/bootlauncher "$LT/bin/bootlauncher"
 cp test/order.conf "$LT/conf/startup.conf"
 rm -f "$ORDER_OUT"
-(cd / && "$LT/bin/bootlauncher") >/tmp/posix-t5.log 2>&1
+(cd / && env -u DISPLAY -u WAYLAND_DISPLAY "$LT/bin/bootlauncher") >/tmp/posix-t5.log 2>&1
 rc=$?
 sleep 1
 if [ "$rc" = 0 ] && check_order_file; then ok=0; else ok=1; fi
@@ -154,6 +155,25 @@ report "cli rm (drops entry and references)" $ok
 if [ "$rca" != 0 ] && [ "$rcb" != 0 ]; then ok=0; else ok=1; fi
 report "cli error exit codes" $ok
 rm -f "$CLI_T"
+
+echo "== 9. GTK GUI self-test (needs gtk+-3.0 dev + a display) =="
+if grep -q HAVE_GUI /tmp/posix-build.log 2>/dev/null \
+   && [ -n "$DISPLAY$WAYLAND_DISPLAY" ]; then
+    # scripted: load model, verify deps pre-selection, run topology check;
+    # every status line is mirrored to stderr as "[gui-status] ..."
+    cp test/order.conf /tmp/bootlauncher-gui.conf
+    APPBOOT_GUI_SELFTEST=1 APPBOOT_GUI_EXPECT_N=3 \
+        ./build/bootlauncher -c /tmp/bootlauncher-gui.conf gui \
+        >/tmp/posix-t9.log 2>&1
+    rc=$?
+    if [ "$rc" = 0 ] && grep -q '1. first' /tmp/posix-t9.log \
+       && grep -q '2. second' /tmp/posix-t9.log \
+       && grep -q '3. third' /tmp/posix-t9.log; then ok=0; else ok=1; fi
+    report "gtk gui load + deps pre-select + topology (scripted)" $ok
+    rm -f /tmp/bootlauncher-gui.conf
+else
+    echo "SKIP  built without GTK or no graphical display"
+fi
 
 echo
 echo "========  $PASS passed, $FAIL failed  ========"
