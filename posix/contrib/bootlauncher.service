@@ -1,0 +1,18 @@
+# systemd unit for the POSIX launcher:
+#   cp contrib/bootlauncher.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable bootlauncher.service
+[Unit]
+Description=Boot-time application launcher (dependency ordered)
+After=local-fs.target network.target
+
+[Service]
+Type=oneshot
+# The launcher forks applications and exits; without KillMode=process
+# systemd would kill the still-running children with the unit's cgroup.
+KillMode=process
+# no -c needed: the binary reads <exe dir>/../conf/startup.conf
+# = /usr/local/conf/startup.conf
+ExecStart=/usr/local/bin/bootlauncher
+
+[Install]
+WantedBy=multi-user.target

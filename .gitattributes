@@ -1,0 +1,25 @@
+# 默认：自动识别文本
+* text=auto
+
+# 文本文件的行尾：源码/文档/shell/POSIX 一律 LF，Windows 批处理 CRLF
+*.c      text eol=lf
+*.h      text eol=lf
+*.sh     text eol=lf
+Makefile text eol=lf
+*.md     text eol=lf
+*.conf   text eol=lf
+*.cmd    text eol=crlf
+*.bat    text eol=crlf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+
+# GBK(代码页936) 文件：按字节存储，禁止任何文本/行尾转换，否则中文会变乱码
+win32/win32_gui.c      binary
+win32/conf/*.conf      binary
+
+# 二进制
+*.exe  binary
+*.o    binary
+*.obj  binary
+*.png  binary
+posix/dist/bin/bootlauncher binary

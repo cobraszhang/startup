@@ -1,0 +1,9 @@
+# 构建产物（发布产物 dist/ 是跟踪的）
+win32/build/
+posix/build/
+
+# 杂项
+*.log
+*.tmp
+Thumbs.db
+.DS_Store

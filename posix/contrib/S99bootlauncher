@@ -1,0 +1,17 @@
+#!/bin/sh
+# SysV init script for the POSIX launcher:
+#   cp contrib/S99bootlauncher /etc/init.d/  (or /etc/rc2.d/S99bootlauncher)
+case "$1" in
+  start)
+    # config is resolved as /usr/local/bin/../conf/startup.conf
+    /usr/local/bin/bootlauncher -d
+    ;;
+  stop|restart|status)
+    # launched applications are managed by their own tooling
+    ;;
+  *)
+    echo "usage: $0 start" >&2
+    exit 1
+    ;;
+esac
+exit 0
