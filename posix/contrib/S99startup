@@ -1,16 +1,16 @@
 #!/bin/sh
 # SysV init script for the POSIX launcher:
-#   cp contrib/S99bootlauncher /etc/init.d/  (or /etc/rc2.d/S99bootlauncher)
+#   cp contrib/S99startup /etc/init.d/  (or /etc/rc2.d/S99startup)
 case "$1" in
   start)
     # config is resolved as /usr/local/bin/../conf/startup.conf;
     # -d detaches the supervisor, which then serves the control
     # interface on /tmp/bootlauncher.ctl for 'app' commands
-    /usr/local/bin/bootlauncher -d serve
+    /usr/local/bin/startup -d serve
     ;;
   stop)
     # stop only the supervisor; applications keep running
-    /usr/local/bin/bootlauncher app shutdown
+    /usr/local/bin/startup app shutdown
     ;;
   restart)
     "$0" stop
@@ -18,7 +18,7 @@ case "$1" in
     "$0" start
     ;;
   status)
-    /usr/local/bin/bootlauncher app status
+    /usr/local/bin/startup app status
     ;;
   *)
     echo "usage: $0 start|stop|restart|status" >&2

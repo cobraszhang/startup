@@ -277,7 +277,7 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
     out[0] = '\0';
     switch (op) {
     case IPC_OP_PING:
-        rep(out, sz, "OK PONG AppBootLauncher %s\n", APPBOOT_VERSION);
+        rep(out, sz, "OK PONG startup %s\n", APPBOOT_VERSION);
         break;
     case IPC_OP_LIST:
         rep(out, sz, "OK configured applications:\n");
@@ -479,7 +479,7 @@ static void WINAPI service_main(DWORD argc, char **argv)
 
     GetModuleFileNameA(NULL, exe, MAX_PATH);
     default_conf_path(exe, conf, sizeof(conf));
-    log_msg("service: AppBootLauncher " APPBOOT_VERSION
+    log_msg("service: startup " APPBOOT_VERSION
             ", configuration file: %s", conf);
 
     report_status(SERVICE_RUNNING, 0);

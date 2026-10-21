@@ -67,7 +67,7 @@ posix/              *nix 平台源文件与工程文件
 
 ```
 win32\dist\                 posix/dist/
-  bin\startup-gcc.exe         bin/bootlauncher
+  bin\startup-gcc.exe         bin/startup
   bin\startup-cl.exe          conf/startup.conf
   conf\startup.conf           README.md
   README.md
@@ -86,10 +86,10 @@ win32\dist\                 posix/dist/
 | 可执行文件 | 默认读取的配置 |
 |---|---|
 | `<安装目录>\bin\startup-gcc.exe` | `<安装目录>\conf\startup.conf` |
-| `<安装目录>/bin/bootlauncher` | `<安装目录>/conf/startup.conf` |
-| `/usr/local/bin/bootlauncher`（make install） | `/usr/local/conf/startup.conf` |
+| `<安装目录>/bin/startup` | `<安装目录>/conf/startup.conf` |
+| `/usr/local/bin/startup`（make install） | `/usr/local/conf/startup.conf` |
 | 开发构建 `win32\build\{debug,release}\*.exe` | `win32\conf\startup.conf`（`..\..\conf` 回退） |
-| 开发构建 `posix/build/{debug,release}/bootlauncher` | `posix/conf/startup.conf`（`../../conf` 回退） |
+| 开发构建 `posix/build/{debug,release}/startup` | `posix/conf/startup.conf`（`../../conf` 回退） |
 
 POSIX 版通过 `/proc/self/exe` 解析自身位置（失败时回退 `argv[0]`），与当前工作目录无关。
 `-c <文件>` 可显式覆盖配置路径。开发构建位于 `build/debug|release` 两级子目录时，会自动回退查找 exe 目录的 `../../conf/startup.conf`（优先 `../conf`，发布/安装布局不受影响）。
@@ -159,12 +159,12 @@ win32\build\release\startup-gcc.exe run -c win32\build\my.conf
 POSIX（选项须在子命令**之前**，getopt 标准行为）：
 
 ```sh
-./build/release/bootlauncher list                             # 在 posix/ 目录下
-./build/release/bootlauncher -c test/order.conf order
-./build/release/bootlauncher -c /usr/local/conf/startup.conf add myapp "echo hi >> /tmp/x"
-./build/release/bootlauncher -c /usr/local/conf/startup.conf set myapp wait 200
-./build/release/bootlauncher -c /usr/local/conf/startup.conf dep add myapp appserver
-./build/release/bootlauncher -c /usr/local/conf/startup.conf rename appserver app
+./build/release/startup list                             # 在 posix/ 目录下
+./build/release/startup -c test/order.conf order
+./build/release/startup -c /usr/local/conf/startup.conf add myapp "echo hi >> /tmp/x"
+./build/release/startup -c /usr/local/conf/startup.conf set myapp wait 200
+./build/release/startup -c /usr/local/conf/startup.conf dep add myapp appserver
+./build/release/startup -c /usr/local/conf/startup.conf rename appserver app
 ```
 
 退出码：`0` 成功；`1` 配置/依赖错误；`2` 用法错误；`3` `app` 控制命令连不上服务进程。
@@ -194,7 +194,7 @@ POSIX（选项须在子命令**之前**，getopt 标准行为）：
 
 ```
 请求                          应答（首行）
-PING                          OK PONG AppBootLauncher <version>
+PING                          OK PONG startup <version>
 LIST                          OK configured applications: ...
 STATUS  | STATUS <name>       OK status: ...（running / stopped / not-started + pid）
 START <name>                  OK started ... / ERR unknown app / already running
@@ -218,10 +218,10 @@ win32\build\release\startup-gcc.exe serve -c win32\test\ctl.conf
 ```
 
 ```sh
-# POSIX：systemd unit（contrib/bootlauncher.service，Type=simple + serve）
-systemctl start bootlauncher.service
-# 或 SysV（contrib/S99bootlauncher：-d serve 后台化），或直接前台
-./build/release/bootlauncher -c test/ctl.conf serve
+# POSIX：systemd unit（contrib/startup.service，Type=simple + serve）
+systemctl start startup.service
+# 或 SysV（contrib/S99startup：-d serve 后台化），或直接前台
+./build/release/startup -c test/ctl.conf serve
 ```
 
 用户进程控制（两平台语法相同；`-s`/`BOOTLAUNCHER_CTL` 指定非默认端点）：
@@ -234,10 +234,10 @@ win32\build\release\startup-gcc.exe app status stayalive -s \\.\pipe\bl-ctl-smok
 ```
 
 ```sh
-./build/release/bootlauncher app status
-./build/release/bootlauncher app stop b
-./build/release/bootlauncher app restart b
-./build/release/bootlauncher app shutdown    # 结束服务进程本身（子应用不受影响）
+./build/release/startup app status
+./build/release/startup app stop b
+./build/release/startup app restart b
+./build/release/startup app shutdown    # 结束服务进程本身（子应用不受影响）
 ```
 
 语义要点：
@@ -276,8 +276,8 @@ win32\build_win32.cmd
 ```sh
 cd posix
 make            # 默认 all：release(-O2 -DNDEBUG) + debug(-g -O0 -D_DEBUG)
-make release    # 仅 build/release/bootlauncher
-make debug      # 仅 build/debug/bootlauncher
+make release    # 仅 build/release/startup
+make debug      # 仅 build/debug/startup
 make install    # release 版装到 /usr/local/bin，样例配置到 /usr/local/conf
 ```
 
@@ -341,10 +341,10 @@ GUI 功能与 Win32 版一致（复用同一套 `cfg_*`/`topo_sort`，保存产�
 
 ```sh
 # 脚本化自检：载入模型、验证依赖预选、跑拓扑校验；状态行镜像到 stderr
-APPBOOT_GUI_SELFTEST=1 APPBOOT_GUI_EXPECT_N=3 ./build/release/bootlauncher -c cfg.conf gui
+APPBOOT_GUI_SELFTEST=1 APPBOOT_GUI_EXPECT_N=3 ./build/release/startup -c cfg.conf gui
 
 # 自截图：窗口映射 0.8s 后用 cairo 渲染保存 PNG 并退出（X11/Wayland 后端都可用）
-APPBOOT_GUI_SHOT=/tmp/gui.png ./build/release/bootlauncher -c cfg.conf
+APPBOOT_GUI_SHOT=/tmp/gui.png ./build/release/startup -c cfg.conf
 ```
 
 > WSLg：Windows 11 的 WSL 自带 Wayland/X11（`DISPLAY=:0`），`posix/build/gui-gtk.png`
@@ -353,15 +353,15 @@ APPBOOT_GUI_SHOT=/tmp/gui.png ./build/release/bootlauncher -c cfg.conf
 
 ## POSIX 开机自启
 
-- systemd：`cp posix/contrib/bootlauncher.service /etc/systemd/system/ && systemctl enable bootlauncher`
-  （unit 用 `Type=simple` + `ExecStart=/usr/local/bin/bootlauncher serve`：服务进程常驻
+- systemd：`cp posix/contrib/startup.service /etc/systemd/system/ && systemctl enable startup`
+  （unit 用 `Type=simple` + `ExecStart=/usr/local/bin/startup serve`：服务进程常驻
   并提供控制接口；`KillMode=mixed` 保证 `systemctl stop` 只终止 supervisor，
   已启动的子应用进程留在系统里。无需 `-c`，配置自动解析为
   `/usr/local/conf/startup.conf`）
-- SysV：`cp posix/contrib/S99bootlauncher /etc/init.d/`（start 用 `-d serve` 后台化；
+- SysV：`cp posix/contrib/S99startup /etc/init.d/`（start 用 `-d serve` 后台化；
   stop/status 通过 `app shutdown` / `app status` 控制接口实现）
-- 或 rc.local：`/usr/local/bin/bootlauncher -d serve`
-- 一次性开机（不需要控制接口）仍可用：`/usr/local/bin/bootlauncher -d`（启动完即退出）
+- 或 rc.local：`/usr/local/bin/startup -d serve`
+- 一次性开机（不需要控制接口）仍可用：`/usr/local/bin/startup -d`（启动完即退出）
 
 ## 测试
 
@@ -381,6 +381,13 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 
 ## 已通过的验证
 
+- 命名统一为 **startup**：POSIX 可执行文件 `bootlauncher` → `startup`（Makefile、
+  `make install`、unit `contrib/startup.service`、`contrib/S99startup`、测试脚本同步）；
+  版本信息中的应用名统一为 `startup`（`version`/`-V`、usage 头行、`PING` 应答
+  `OK PONG startup <version>`、`appboot.rc` 的 ProductName/FileDescription/CompanyName、
+  两版 GUI 标题 `… - startup v<版本>`、cfg_save 生成头注释）。
+  有意保留的旧标识：Windows 服务名 `AppBootLauncher`、管道 `\\.\pipe\AppBootLauncher`、
+  套接字 `/tmp/bootlauncher.ctl`、环境变量 `BOOTLAUNCHER_CTL`（均为接口标识，非版本信息）。
 - 控制接口（三类进程模型）实测：
   - POSIX：`serve` + 默认/自定义端点下 `app ping/status/stop/restart/start ghost/shutdown`
     全序列正确；`stop` 走 SIGTERM→（2s）→SIGKILL；服务自然退出被 `status` 标记为

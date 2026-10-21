@@ -114,7 +114,7 @@ int cli_is_known(const char *cmd)
 
 void cli_usage(const char *prog)
 {
-    fprintf(stderr, "AppBootLauncher %s\n", APPBOOT_VERSION);
+    fprintf(stderr, "startup %s\n", APPBOOT_VERSION);
     fprintf(stderr,
         "management subcommands (operate on the configuration file):\n"
         "  list                     list applications\n"
@@ -200,7 +200,7 @@ int cli_main(int argc, char **argv, const char *prog,
         return 0;
     }
     if (strcmp(cmd, "version") == 0) {
-        printf("AppBootLauncher %s\n", APPBOOT_VERSION);
+        printf("startup %s\n", APPBOOT_VERSION);
         return 0;
     }
     if (strcmp(cmd, "app") == 0)

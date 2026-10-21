@@ -20,12 +20,13 @@ BEGIN
     BEGIN
         BLOCK "040904E4"
         BEGIN
-            VALUE "CompanyName",  "AppBootLauncher Project\0"
-            VALUE "FileDescription", "Boot-time application launcher\0"
+            VALUE "CompanyName",  "startup\0"
+            VALUE "FileDescription", "startup\0"
             VALUE "FileVersion",     "0.1.1\0"
             VALUE "ProductVersion",  "0.1.1\0"
+            VALUE "ProductName",     "startup\0"
             VALUE "InternalName",    "startup\0"
-            VALUE "OriginalFilename","startup-gcc.exe\0"
+            VALUE "OriginalFilename","startup.exe\0"
             VALUE "LegalCopyright",  "Unpublished / Proprietary\0"
         END
     END

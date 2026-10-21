@@ -3,8 +3,8 @@
 # C89 core in ../src, compiler output in ./build/{debug,release},
 # release package in ./dist/bin. Requires a C89 compiler (cc/gcc/clang).
 #
-#   make            -> build/release/bootlauncher  (-O2 -DNDEBUG)
-#   make debug      -> build/debug/bootlauncher    (-g -O0 -D_DEBUG)
+#   make            -> build/release/startup  (-O2 -DNDEBUG)
+#   make debug      -> build/debug/startup    (-g -O0 -D_DEBUG)
 #   make all        -> both
 
 CC      ?= cc
@@ -48,13 +48,13 @@ HDRS = $(CORE)/cfg.h $(CORE)/topo.h $(CORE)/log.h $(CORE)/cli.h \
 all: release debug
 
 release:
-	@$(MAKE) MODE=release bootlauncher
+	@$(MAKE) MODE=release startup
 
 debug:
-	@$(MAKE) MODE=debug bootlauncher
+	@$(MAKE) MODE=debug startup
 
-bootlauncher: $(OBJS)
-	$(CC) $(ALL_CFLAGS) -o $(OBJDIR)/bootlauncher $(OBJS) $(GTK_LIBS)
+startup: $(OBJS)
+	$(CC) $(ALL_CFLAGS) -o $(OBJDIR)/startup $(OBJS) $(GTK_LIBS)
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
@@ -73,21 +73,21 @@ $(OBJDIR)/gui_gtk.o: gui_gtk.c posix_app.h $(HDRS) | $(OBJDIR)
 
 # install the launcher and a default configuration
 # (the binary resolves its config as <exe dir>/../conf/startup.conf,
-#  so /usr/local/bin/bootlauncher reads /usr/local/conf/startup.conf)
+#  so /usr/local/bin/startup reads /usr/local/conf/startup.conf)
 install:
-	@$(MAKE) MODE=release bootlauncher
-	install -m 755 $(BLD)/release/bootlauncher /usr/local/bin/bootlauncher
+	@$(MAKE) MODE=release startup
+	install -m 755 $(BLD)/release/startup /usr/local/bin/startup
 	mkdir -p /usr/local/conf
 	install -m 644 conf/startup.conf /usr/local/conf/startup.conf
 
-# release package: posix/dist/{bin/bootlauncher, conf/startup.conf}
+# release package: posix/dist/{bin/startup, conf/startup.conf}
 package:
-	@$(MAKE) MODE=release bootlauncher
+	@$(MAKE) MODE=release startup
 	mkdir -p dist/bin dist/conf
-	cp -f $(BLD)/release/bootlauncher dist/bin/bootlauncher
+	cp -f $(BLD)/release/startup dist/bin/startup
 	cp -f conf/startup.conf dist/conf/startup.conf
 	cp -f ../README.md dist/README.md
-	@echo "package ready: posix/dist  (bin/bootlauncher, conf/startup.conf)"
+	@echo "package ready: posix/dist  (bin/startup, conf/startup.conf)"
 
 clean:
 	rm -rf $(BLD)

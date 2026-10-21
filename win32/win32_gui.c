@@ -560,7 +560,7 @@ int gui_main(const char *confpath)
 
     {
         char ttl[256];
-        sprintf(ttl, "开机启动应用管理器 - AppBootLauncher v%s",
+        sprintf(ttl, "开机启动应用管理器 - startup v%s",
                 APPBOOT_VERSION);
         hwnd = CreateWindowExA(0, wc.lpszClassName, ttl,
         WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,

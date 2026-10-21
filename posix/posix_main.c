@@ -51,19 +51,20 @@
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "AppBootLauncher %s\n", APPBOOT_VERSION);
+    fprintf(stderr, "startup %s\n", APPBOOT_VERSION);
     fprintf(stderr,
         "usage: %s [-c config-file] [-s endpoint] [-d] [-V] [subcommand ...]\n"
         "  default config: <exe dir>/../conf/startup.conf\n"
         "  -c FILE  configuration file (overrides the default)\n"
         "  -s NAME  control endpoint for 'serve' and 'app' subcommands\n"
         "           (default /tmp/bootlauncher.ctl, env BOOTLAUNCHER_CTL)\n"
-        "  -d       detach into the background (boot or serve mode)\n"
+        "  -d       detach into the background (boot or serve mode)\n",
+        prog);
+    fprintf(stderr,
         "  -V       print version and exit\n"
         "  (no subcommand) opens the configuration GUI when a graphical\n"
         "  session is detected; otherwise boots the applications\n"
-        "  serve     boot + stay resident as the control server\n",
-        prog);
+        "  serve     boot + stay resident as the control server\n");
     cli_usage(prog);
     fprintf(stderr, "  gui                      force opening the GUI\n");
 }
@@ -351,7 +352,7 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
     out[0] = '\0';
     switch (op) {
     case IPC_OP_PING:
-        rep(out, sz, "OK PONG AppBootLauncher %s\n", APPBOOT_VERSION);
+        rep(out, sz, "OK PONG startup %s\n", APPBOOT_VERSION);
         break;
     case IPC_OP_LIST:
         rep(out, sz, "OK configured applications:\n");
@@ -472,7 +473,7 @@ int main(int argc, char **argv)
             break;
         case 'd': daemon_mode = 1; break;
         case 'V':
-            printf("AppBootLauncher %s\n", APPBOOT_VERSION);
+            printf("startup %s\n", APPBOOT_VERSION);
             return 0;
         default:  usage(argv[0]); return 2;
         }
@@ -526,7 +527,7 @@ int main(int argc, char **argv)
             /* resident supervisor: boot everything, then keep serving
              * the control interface (used by systemd / SysV / desktop) */
             if (daemon_mode) daemonize();
-            log_msg("posix supervisor " APPBOOT_VERSION
+            log_msg("startup supervisor " APPBOOT_VERSION
                     ": configuration file: %s", chosen);
             if (sup_load(chosen) != 0) return 1;
             sup_boot();
@@ -551,7 +552,7 @@ int main(int argc, char **argv)
 
     if (daemon_mode) daemonize();
 
-    log_msg("posix launcher " APPBOOT_VERSION ": configuration file: %s",
+    log_msg("startup " APPBOOT_VERSION ": configuration file: %s",
             chosen);
     return run_all(chosen) == 0 ? 0 : 1;
 }

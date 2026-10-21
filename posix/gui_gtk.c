@@ -509,7 +509,7 @@ int gui_main(const char *confpath, cli_run_fn run_fn)
     }
 
     win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    sprintf(ttl, "开机启动应用管理器 - AppBootLauncher v%s",
+    sprintf(ttl, "开机启动应用管理器 - startup v%s",
             APPBOOT_VERSION);
     gtk_window_set_title(GTK_WINDOW(win), ttl);
     gtk_window_set_default_size(GTK_WINDOW(win), 900, 620);
