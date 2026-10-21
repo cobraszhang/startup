@@ -18,8 +18,13 @@ int  cli_is_known(const char *cmd);
 void cli_usage(const char *prog);
 
 /* Execute the management subcommand argv[0] with argv[1..argc-1].
- * Returns process exit code: 0 ok, 1 error, 2 usage. */
+ * Returns process exit code: 0 ok, 1 error, 2 usage, 3 service not
+ * reachable ('app' control subcommand). */
 int  cli_main(int argc, char **argv, const char *prog,
               const char *confpath, cli_run_fn run_fn);
+
+/* Optional -s override for the 'app' control channel endpoint
+ * (see src/ipc.h; otherwise $BOOTLAUNCHER_CTL or the default). */
+void cli_set_endpoint(const char *endpoint);
 
 #endif /* CLI_H */

@@ -1,12 +1,13 @@
 # 开机自动加载应用启动器（boot-time application launcher）
 
 按配置文件中的 **依赖关系（deps）** 决定应用的启动顺序：先做拓扑排序，再按序启动。
-提供两个版本，共享同一套纯 **C89** 核心代码：
+服务进程常驻运行，并对登录后的用户进程提供 **控制接口（IPC）**：启动/中止/重启/状态
+（见“进程模型与控制接口”）。提供两个版本，共享同一套纯 **C89** 核心代码：
 
 | 版本 | 入口 | 开机自启方式 |
 |---|---|---|
-| Win32 | `src/win32_service.c`（服务/CLI 入口）+ `src/win32_gui.c`（无参数时的配置/状态窗口）+ 共享 `src/cli.c` | **Windows 系统服务**（`SERVICE_AUTO_START`，由 SCM 开机拉起） |
-| POSIX | `src/posix_main.c`（开机/CLI 入口）+ 共享 `src/cli.c` | init / rc.local / SysV init.d / systemd unit 调用一次 |
+| Win32 | `win32/win32_service.c`（服务/CLI 入口）+ `win32/win32_gui.c`（无参数时的配置/状态窗口）+ 共享 `src/cli.c` | **Windows 系统服务**（`SERVICE_AUTO_START`，由 SCM 开机拉起；supervisor 常驻） |
+| POSIX | `posix/posix_main.c`（开机/supervisor/CLI 入口）+ 共享 `src/cli.c` | systemd unit（`serve` 常驻 supervisor）/ SysV / rc.local；一次性开机模式仍保留 |
 
 ## 目录结构
 
@@ -18,6 +19,9 @@ src/                仅放跨平台共享源文件（纯 C89）
   log.[ch]            带时间戳的日志（可重定向到 GUI）
   cli.[ch]            共享命令行管理接口（Win32 与 POSIX 同一个 cli_main）
   version.h           发布版本号单一来源（当前 0.1.1）
+  ipc.[ch]            服务进程↔用户进程控制协议（共享语法与客户端调用）
+  ipc_win32.c         命名管道传输（服务侧 + CLI 客户端）
+  ipc_posix.c         AF_UNIX 套接字传输（含 FD_CLOEXEC，防 fd 泄入子应用）
 
 win32/              Win32 平台源文件与工程文件
   win32_service.c     服务/CLI 入口（SCM 注册、CreateProcess 启动）
@@ -135,9 +139,12 @@ dep add <a> <b>          让 a 依赖 b（b 必须已存在）
 dep del <a> <b>          删除该依赖
 help                     子命令帮助
 version                  打印发布版本号（POSIX 还有等价的 -V 选项）
+app ...                  控制运行中的应用（IPC，见下节；不改配置文件）
 ```
 
 > `gui`（仅 POSIX 且构建时带 GTK）：强制打开图形配置窗口，不在共享 `cli.c` 子命令表内。
+> `serve`（两版通用，也不是子命令表项）：以前台 supervisor 方式开机启动全部应用并保持
+> 运行，对外提供控制接口，见「进程模型与控制接口」。
 
 Windows（`-c` 可出现在任意位置；无参数仍打开 GUI）：
 
@@ -160,8 +167,89 @@ POSIX（选项须在子命令**之前**，getopt 标准行为）：
 ./build/release/bootlauncher -c /usr/local/conf/startup.conf rename appserver app
 ```
 
-退出码：`0` 成功；`1` 配置/依赖错误；`2` 用法错误。
+退出码：`0` 成功；`1` 配置/依赖错误；`2` 用法错误；`3` `app` 控制命令连不上服务进程。
 `add` 生成的条目立即带合法 `cmd`，因此任何时刻配置文件都可被服务/开机流程读取。
+
+## 进程模型与控制接口（IPC）
+
+项目内的进程分三类：
+
+| 类别 | 角色 | 生命周期 |
+|---|---|---|
+| **服务进程** | 开机启动的主服务（Win32 服务 `service`，或两版通用的 `serve` 前台 supervisor） | 常驻，持有配置模型与已启动应用的进程句柄/PID |
+| **子应用进程** | 服务进程按依赖序启动的用户程序 | 由服务进程跟踪，可被停止/重启 |
+| **用户进程** | 登录之后在控制台/窗口里执行的程序（CLI `app` 子命令等） | 一次性：连接服务进程 → 发一条命令 → 打印应答后退出 |
+
+服务进程为用户进程提供对子应用进程的四类接口：**启动（start）、中止（stop）、
+重启（restart）、状态（status）**（外加 list/ping/shutdown）。
+
+### 传输与端点
+
+- Win32：命名管道 `\\.\pipe\AppBootLauncher`；
+- POSIX：AF_UNIX 流式套接字 `/tmp/bootlauncher.ctl`；
+- 覆盖方式：`-s <endpoint>` 选项或环境变量 `BOOTLAUNCHER_CTL`（服务侧与客户侧一致；
+  服务进程启动日志会打印它监听的端点）。
+
+### 协议（两平台一致，文本行，一次连接一条命令）
+
+```
+请求                          应答（首行）
+PING                          OK PONG AppBootLauncher <version>
+LIST                          OK configured applications: ...
+STATUS  | STATUS <name>       OK status: ...（running / stopped / not-started + pid）
+START <name>                  OK started ... / ERR unknown app / already running
+STOP <name>                   OK stopped ... / ERR not running
+RESTART <name>                  OK restarted ...
+QUIT                          OK bye（服务进程随即退出）
+```
+
+共享实现在 `src/ipc.[ch]`（语法解析与客户端调用）+ `src/ipc_win32.c` /
+`src/ipc_posix.c`（管道 / unix 套接字传输）。
+
+### 用法示例
+
+服务进程启动（任选其一）：
+
+```bat
+:: Win32：正式服务（SCM），开机自动
+win32\dist\bin\startup-gcc.exe install && win32\dist\bin\startup-gcc.exe start
+:: Win32：前台 supervisor（调试/桌面）
+win32\build\release\startup-gcc.exe serve -c win32\test\ctl.conf
+```
+
+```sh
+# POSIX：systemd unit（contrib/bootlauncher.service，Type=simple + serve）
+systemctl start bootlauncher.service
+# 或 SysV（contrib/S99bootlauncher：-d serve 后台化），或直接前台
+./build/release/bootlauncher -c test/ctl.conf serve
+```
+
+用户进程控制（两平台语法相同；`-s`/`BOOTLAUNCHER_CTL` 指定非默认端点）：
+
+```bat
+win32\build\release\startup-gcc.exe app status
+win32\build\release\startup-gcc.exe app stop stayalive
+win32\build\release\startup-gcc.exe app restart stayalive
+win32\build\release\startup-gcc.exe app status stayalive -s \\.\pipe\bl-ctl-smoke
+```
+
+```sh
+./build/release/bootlauncher app status
+./build/release/bootlauncher app stop b
+./build/release/bootlauncher app restart b
+./build/release/bootlauncher app shutdown    # 结束服务进程本身（子应用不受影响）
+```
+
+语义要点：
+
+- 服务进程停止（`net stop` / `systemctl stop` / SIGTERM / `app shutdown`）**不会**
+  杀掉子应用进程；控制接口随之消失。
+- 停止子应用：POSIX 先发 SIGTERM，约 2 秒未退出再 SIGKILL；Win32 用
+  `TerminateProcess`（立即强制结束，见已知限制）。
+- `start/restart` 使用配置模型里的 `cmd`；改配置后需重启服务进程（或先 `rm` 再
+  重新 `serve`）才会重新载入模型。
+- 服务进程对子应用的退出做自然回收（POSIX `waitpid WNOHANG`；Win32
+  `GetExitCodeProcess`），`status` 会把自然退出的应用标为 `stopped`。
 
 ## 构建
 
@@ -205,6 +293,7 @@ Makefile 会自动加 `-DHAVE_GUI` 编译 `gui_gtk.c` 并链接 GTK（其 includ
 ```bat
 win32\build\release\startup-gcc.exe                  :: 无参数：打开 GUI 配置/状态窗口
 win32\build\release\startup-gcc.exe service          :: 服务入口（SCM 用；install 时自动写入 binPath）
+win32\build\release\startup-gcc.exe serve            :: 前台 supervisor（不注册服务，也有控制接口）
 win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动启动，需管理员）
 win32\build\release\startup-gcc.exe start | stop | uninstall
 win32\build\release\startup-gcc.exe run | console -c test\order.conf   :: 不装服务，直接在控制台调试
@@ -222,6 +311,9 @@ GUI 窗口功能（结构化编辑每个参数）：
 - 核心日志（解析错误、环、启动记录）全部重定向到状态框。
 
 - 服务注册的 binPath 为 `"<exe>" service`，开机由 SCM 带 `service` 参数拉起。
+- `service`/`serve` 都以 supervisor 模式常驻：启动全部应用后保留其句柄，并在命名管道
+  `\\.\pipe\AppBootLauncher` 上提供 `app start|stop|restart|status` 控制接口
+  （见“进程模型与控制接口”）；`net stop` 只结束服务进程，应用留在系统里。
 - 服务默认读取 **`<exe 目录>\..\conf\startup.conf`**（`-c` 可覆盖）。
 - 服务以 LocalSystem 运行，启动的应用无交互桌面。
 - 也可用系统命令注册：`sc create AppBootLauncher binPath= "\"D:\...\bin\startup-gcc.exe\" service" start= auto`。
@@ -262,11 +354,14 @@ APPBOOT_GUI_SHOT=/tmp/gui.png ./build/release/bootlauncher -c cfg.conf
 ## POSIX 开机自启
 
 - systemd：`cp posix/contrib/bootlauncher.service /etc/systemd/system/ && systemctl enable bootlauncher`
-  （unit 里的 `KillMode=process` 是必需的：launcher 启动应用后退出，默认
-  `control-group` 模式会把 cgroup 里尚未退出的子进程一并杀掉；无需 `-c`，
-  配置自动解析为 `/usr/local/conf/startup.conf`）
-- SysV：`cp posix/contrib/S99bootlauncher /etc/init.d/`（脚本内部用 `-d` 后台化）
-- 或 rc.local：`/usr/local/bin/bootlauncher -d &`
+  （unit 用 `Type=simple` + `ExecStart=/usr/local/bin/bootlauncher serve`：服务进程常驻
+  并提供控制接口；`KillMode=mixed` 保证 `systemctl stop` 只终止 supervisor，
+  已启动的子应用进程留在系统里。无需 `-c`，配置自动解析为
+  `/usr/local/conf/startup.conf`）
+- SysV：`cp posix/contrib/S99bootlauncher /etc/init.d/`（start 用 `-d serve` 后台化；
+  stop/status 通过 `app shutdown` / `app status` 控制接口实现）
+- 或 rc.local：`/usr/local/bin/bootlauncher -d serve`
+- 一次性开机（不需要控制接口）仍可用：`/usr/local/bin/bootlauncher -d`（启动完即退出）
 
 ## 测试
 
@@ -276,10 +371,28 @@ cd posix && sh test/run_posix_tests.sh
 #   wsl -u root bash -c "cd /mnt/d/My/DEV/startup/posix && sh test/run_posix_tests.sh"
 ```
 
-Win32 服务完整生命周期：以管理员运行 `win32\test\svc_lifecycle.cmd`。
+20 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
+自定义端点的 `serve`，走 `app ping/status/stop/restart/unknown/shutdown` 全序列，
+并验证服务退出后 `app` 命令 rc=3。
+
+Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop` 控制接口验证）：
+以管理员运行 `win32\test\svc_lifecycle.cmd`；
+`win32\test\ctl.conf` 配 `serve -s \\.\pipe\...` 可做前台控制接口冒烟。
 
 ## 已通过的验证
 
+- 控制接口（三类进程模型）实测：
+  - POSIX：`serve` + 默认/自定义端点下 `app ping/status/stop/restart/start ghost/shutdown`
+    全序列正确；`stop` 走 SIGTERM→（2s）→SIGKILL；服务自然退出被 `status` 标记为
+    `stopped`；`app shutdown` 后 supervisor 干净退出（rc=0），再执行 `app` 命令 rc=3。
+    曾发现 fork 出的子应用继承控制连接 fd 导致应答无法 EOF 挂起，已用 `FD_CLOEXEC` 修复
+    并被第 10 节回归覆盖。
+  - Win32：`svc_lifecycle.cmd`（管理员）实测 安装→启动→`sc query` RUNNING→服务活跃期间
+    另一进程 `app status`（长驻应用 `running`、已退出的探测应用被正确标 `stopped`）→
+    `app stop`→`net stop`（自连 QUIT 释放 accept 线程，≤3s 内 STOPPED）→卸载，全程 rc=0；
+    前台 `serve -s` 冒烟同样全序列通过（CreateProcess 不继承句柄，无 fd 泄漏问题）。
+  - systemd unit 已改为 `Type=simple` + `serve`，套件第 6 节相应补充 `systemctl stop`
+    清理（常驻服务不 stop 会跨运行泄漏，曾导致相邻用例互相干扰）。
 - WSL Ubuntu 24.04 (gcc 13) + WSLg 实测 GTK+3 版：`-std=c89 -pedantic` 零警告编译（GTK 头走
   `-isystem`）；`gui` 子命令与无参数自动检测（Wayland/X11 路径）均正确打开窗口；
   自截图确认窗口完整渲染（中文标签、列表、表单、依赖多选预选、状态框载入 3 应用）；
@@ -312,4 +425,7 @@ Win32 服务完整生命周期：以管理员运行 `win32\test\svc_lifecycle.cm
 
 - 单行配置最长 1024 字节；命令行最长 4096 字节。
 - 依赖顺序是“启动顺序”保证，不是“就绪”保证；需要严格就绪语义时用 `wait` 或让被依赖应用自行监听端口/信号。
+- Win32 的 `app stop/restart` 用 `TerminateProcess` 强制结束（无优雅退出宽限）；POSIX 为 SIGTERM→2s→SIGKILL。
+- 控制接口单实例串行处理（同一时刻一个客户端）；模型只在服务进程启动时载入，
+  改配置后需重启服务进程生效。
 - 仅 ANSI（A 系）Win32 API；路径含非 ASCII 时建议配置文件与程序目录使用 ASCII 路径。

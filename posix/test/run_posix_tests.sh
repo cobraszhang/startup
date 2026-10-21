@@ -77,13 +77,16 @@ if [ "$(id -u)" = "0" ] || sudo -n true 2>/dev/null; then
     $SUDO cp test/order.conf /usr/local/conf/startup.conf
     $SUDO cp contrib/bootlauncher.service /etc/systemd/system/
     $SUDO systemctl daemon-reload
+    $SUDO systemctl stop bootlauncher.service >/dev/null 2>&1   # idempotent
     rm -f "$ORDER_OUT"
     $SUDO systemctl start bootlauncher.service
     sleep 2
     if check_order_file; then ok=0; else ok=1; fi
     report "systemd unit starts apps in dependency order" $ok
 
-    # cleanup (leave /usr/local/bin/bootlauncher installed)
+    # cleanup: the unit is Type=simple (resident supervisor) - it must
+    # be stopped, not just disabled, or it leaks into the next run
+    $SUDO systemctl stop bootlauncher.service >/dev/null 2>&1
     $SUDO systemctl disable bootlauncher.service >/dev/null 2>&1
     $SUDO rm -f /etc/systemd/system/bootlauncher.service
     $SUDO systemctl daemon-reload
@@ -187,6 +190,50 @@ if grep -q HAVE_GUI /tmp/posix-build.log 2>/dev/null \
 else
     echo "SKIP  built without GTK or no graphical display"
 fi
+
+echo "== 10. control IPC (app start/stop/restart/status via serve) =="
+CTL_S="/tmp/bl-ctl-$$.sock"
+CTL_C="/tmp/bl-ctl-$$.conf"
+cp test/ctl.conf "$CTL_C"
+rm -f "$CTL_S"
+BOOTLAUNCHER_CTL="$CTL_S" ./build/release/bootlauncher -c "$CTL_C" serve \
+    >/tmp/posix-t10-srv.log 2>&1 &
+SRV=$!
+i=0
+while [ ! -S "$CTL_S" ] && [ "$i" -lt 50 ]; do i=$((i + 1)); sleep 0.1; done
+CAP() { BOOTLAUNCHER_CTL="$CTL_S" ./build/release/bootlauncher app "$@"; }
+
+CAP ping      >/tmp/posix-t10a.log 2>&1
+CAP status    >/tmp/posix-t10b.log 2>&1
+CAP stop a    >/dev/null 2>&1
+CAP status a  >/tmp/posix-t10c.log 2>&1
+CAP restart a >/tmp/posix-t10d.log 2>&1
+CAP status a  >/tmp/posix-t10e.log 2>&1
+CAP start ghost >/tmp/posix-t10f.log 2>&1; rcg=$?
+ok=1
+if grep -q '^OK PONG' /tmp/posix-t10a.log \
+   && grep -Eq '^  a +running' /tmp/posix-t10b.log \
+   && grep -Eq '^  a +stopped' /tmp/posix-t10c.log \
+   && grep -q '^OK restarted' /tmp/posix-t10d.log \
+   && grep -Eq '^  a +running' /tmp/posix-t10e.log \
+   && [ "$rcg" = 1 ] && grep -q "^ERR unknown app 'ghost'" /tmp/posix-t10f.log
+then ok=0; fi
+report "supervisor IPC: ping/status/stop/restart/unknown" $ok
+
+CAP stop a     >/dev/null 2>&1
+CAP stop b     >/dev/null 2>&1
+CAP shutdown   >/tmp/posix-t10g.log 2>&1
+wait $SRV; rcs=$?
+CAP ping >/dev/null 2>&1; rcp=$?
+if [ "$rcs" = 0 ] && grep -q '^OK bye' /tmp/posix-t10g.log \
+   && [ "$rcp" = 3 ]; then ok=0; else ok=1; fi
+report "app shutdown ends supervisor; then unreachable (rc=3)" $ok
+
+pkill -x sleep 2>/dev/null
+rm -f "$CTL_S" "$CTL_C" /tmp/posix-t10a.log /tmp/posix-t10b.log \
+      /tmp/posix-t10c.log /tmp/posix-t10d.log /tmp/posix-t10e.log \
+      /tmp/posix-t10f.log /tmp/posix-t10g.log /tmp/posix-t10-srv.log
+
 
 echo
 echo "========  $PASS passed, $FAIL failed  ========"

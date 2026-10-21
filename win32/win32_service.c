@@ -22,12 +22,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 #include "cfg.h"
 #include "topo.h"
 #include "log.h"
 #include "cli.h"
 #include "version.h"
+#include "ipc.h"
 #include "win32_app.h"
 
 #define CONF_SUBPATH   "..\\conf\\startup.conf"
@@ -141,6 +143,260 @@ int run_all(const char *confpath)
 }
 
 /* ------------------------------------------------------------------ */
+/* supervisor: resident control interface for user processes           */
+/*                                                                     */
+/* Started by the SCM ("service") or in the foreground ("serve").      */
+/* Loads the model, starts the apps in dependency order but KEEPS the  */
+/* process handles, and serves the line protocol from src/ipc.h on a   */
+/* named pipe so user processes can START/STOP/RESTART/STATUS them.    */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    HANDLE h;      /* process handle while running, else NULL        */
+    DWORD  pid;
+    int    state;  /* 0 not started, 1 running, 2 stopped/exited     */
+} rt_t;
+
+static app_t        *g_sapps;                 /* kept for the run     */
+static int           g_sn;
+static rt_t         *g_srt;
+static char          g_ep[512];
+static volatile long g_supquit;
+
+static void ep_ensure(void)
+{
+    if (!g_ep[0]) ipc_default_endpoint(g_ep, sizeof(g_ep));
+}
+
+/* append one formatted line to the reply buffer */
+static void rep(char *out, size_t sz, const char *fmt, ...)
+{
+    char    tmp[512];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsprintf(tmp, fmt, ap);
+    va_end(ap);
+    strncat(out, tmp, sz - strlen(out) - 1);
+}
+
+static void state_name(int st, char *buf, size_t sz)
+{
+    if (st == 1)      strncpy(buf, "running",     sz);
+    else if (st == 2) strncpy(buf, "stopped",     sz);
+    else              strncpy(buf, "not-started", sz);
+    buf[sz - 1] = '\0';
+}
+
+static int sup_load(const char *confpath)
+{
+    if (cfg_load(confpath, &g_sapps, &g_sn) != 0)
+        return -1;
+    g_srt = (rt_t *)calloc((size_t)(g_sn > 0 ? g_sn : 1), sizeof(rt_t));
+    if (!g_srt) return -1;
+    return 0;
+}
+
+static int sup_launch(int i)
+{
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    char cmdline[CMD_MAX];
+
+    strncpy(cmdline, g_sapps[i].cmd, sizeof(cmdline) - 1);
+    cmdline[sizeof(cmdline) - 1] = '\0';
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+
+    if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
+                        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                        NULL, NULL, &si, &pi)) {
+        log_msg("sup: start '%s' failed (cmd='%s') err=%lu",
+                g_sapps[i].name, g_sapps[i].cmd,
+                (unsigned long)GetLastError());
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    g_srt[i].h     = pi.hProcess;
+    g_srt[i].pid   = pi.dwProcessId;
+    g_srt[i].state = 1;
+    log_msg("sup: started '%s' pid=%lu",
+            g_sapps[i].name, (unsigned long)pi.dwProcessId);
+    return 0;
+}
+
+static void sup_boot(void)
+{
+    int *order = NULL;
+    int  i, rc;
+
+    rc = topo_sort(g_sapps, g_sn, &order);
+    if (rc != 0) {
+        log_msg("startup aborted: dependency ordering failed (code %d)", rc);
+        return;
+    }
+    log_msg("startup: %d application(s), order:", g_sn);
+    for (i = 0; i < g_sn; i++)
+        log_msg("startup:   %d. %s", i + 1, g_sapps[order[i]].name);
+
+    for (i = 0; i < g_sn; i++) {
+        int idx = order[i];
+        sup_launch(idx);
+        if (g_sapps[idx].wait_ms > 0 && g_stop &&
+            WaitForSingleObject(g_stop, (DWORD)g_sapps[idx].wait_ms)
+                == WAIT_OBJECT_0) {
+            log_msg("startup: stop requested, remaining apps not started");
+            break;
+        }
+    }
+    free(order);
+}
+
+/* refresh and return the state of entry i (detects natural exit) */
+static int rt_state(int i)
+{
+    if (g_srt[i].state == 1) {
+        DWORD code = 0;
+        if (!g_srt[i].h ||
+            (!GetExitCodeProcess(g_srt[i].h, &code) ||
+             code != STILL_ACTIVE)) {
+            if (g_srt[i].h) CloseHandle(g_srt[i].h);
+            g_srt[i].h     = NULL;
+            g_srt[i].state = 2;
+        }
+    }
+    return g_srt[i].state;
+}
+
+static int svc_ops(int op, const char *name, char *out, size_t sz)
+{
+    int idx;
+
+    out[0] = '\0';
+    switch (op) {
+    case IPC_OP_PING:
+        rep(out, sz, "OK PONG AppBootLauncher %s\n", APPBOOT_VERSION);
+        break;
+    case IPC_OP_LIST:
+        rep(out, sz, "OK configured applications:\n");
+        for (idx = 0; idx < g_sn; idx++)
+            rep(out, sz, "  %-20s cmd=%s\n",
+                g_sapps[idx].name, g_sapps[idx].cmd);
+        break;
+    case IPC_OP_STATUS:
+        if (*name) {
+            char st[16];
+            idx = cfg_index(g_sapps, g_sn, name);
+            if (idx < 0) { rep(out, sz, "ERR unknown app '%s'\n", name);
+                           break; }
+            state_name(rt_state(idx), st, sizeof(st));
+            rep(out, sz, "OK status %s:\n  %s %s pid=%lu\n",
+                name, g_sapps[idx].name, st,
+                (unsigned long)g_srt[idx].pid);
+        } else {
+            rep(out, sz, "OK status:\n");
+            for (idx = 0; idx < g_sn; idx++) {
+                char st[16];
+                state_name(rt_state(idx), st, sizeof(st));
+                rep(out, sz, "  %-20s %s pid=%lu\n",
+                    g_sapps[idx].name, st,
+                    (unsigned long)g_srt[idx].pid);
+            }
+        }
+        break;
+    case IPC_OP_START:
+        idx = cfg_index(g_sapps, g_sn, name);
+        if (idx < 0)                    rep(out, sz, "ERR unknown app '%s'\n", name);
+        else if (rt_state(idx) == 1)    rep(out, sz, "ERR '%s' already running (pid=%lu)\n",
+                                            name, (unsigned long)g_srt[idx].pid);
+        else if (sup_launch(idx) != 0)  rep(out, sz, "ERR launch failed for '%s'\n", name);
+        else                            rep(out, sz, "OK started '%s' pid=%lu\n",
+                                            name, (unsigned long)g_srt[idx].pid);
+        break;
+    case IPC_OP_STOP:
+        idx = cfg_index(g_sapps, g_sn, name);
+        if (idx < 0)                 rep(out, sz, "ERR unknown app '%s'\n", name);
+        else if (rt_state(idx) != 1) rep(out, sz, "ERR '%s' not running\n", name);
+        else {
+            TerminateProcess(g_srt[idx].h, 0);
+            CloseHandle(g_srt[idx].h);
+            g_srt[idx].h     = NULL;
+            g_srt[idx].state = 2;
+            log_msg("sup: stopped '%s' pid=%lu", g_sapps[idx].name,
+                    (unsigned long)g_srt[idx].pid);
+            rep(out, sz, "OK stopped '%s'\n", name);
+        }
+        break;
+    case IPC_OP_RESTART:
+        idx = cfg_index(g_sapps, g_sn, name);
+        if (idx < 0)                rep(out, sz, "ERR unknown app '%s'\n", name);
+        else {
+            if (rt_state(idx) == 1) {
+                TerminateProcess(g_srt[idx].h, 0);
+                CloseHandle(g_srt[idx].h);
+                g_srt[idx].h     = NULL;
+                g_srt[idx].state = 2;
+            }
+            if (sup_launch(idx) != 0)
+                rep(out, sz, "ERR restart failed for '%s'\n", name);
+            else
+                rep(out, sz, "OK restarted '%s' pid=%lu\n",
+                    name, (unsigned long)g_srt[idx].pid);
+        }
+        break;
+    case IPC_OP_QUIT:
+        g_supquit = 1;
+        rep(out, sz, "OK bye\n");
+        break;
+    default:
+        rep(out, sz, "ERR internal\n");
+        break;
+    }
+    return op;
+}
+
+static void serve_loop(void)
+{
+    void *srv;
+    char  line[IPC_LINE_MAX], out[8192];
+
+    ep_ensure();
+    srv = ipc_server_open(g_ep);
+    if (!srv) {
+        log_msg("sup: cannot create control endpoint '%s'", g_ep);
+        return;
+    }
+    log_msg("sup: control interface ready at %s", g_ep);
+
+    while (!g_supquit &&
+           !(g_stop && WaitForSingleObject(g_stop, 0) == WAIT_OBJECT_0)) {
+        int op;
+        if (ipc_server_accept(srv) != 0) break;
+        if (ipc_server_readline(srv, line, sizeof(line)) > 0) {
+            op = ipc_dispatch(line, out, sizeof(out), svc_ops);
+            ipc_server_write(srv, out);
+            if (op == IPC_OP_QUIT) {
+                ipc_server_closeconn(srv);
+                break;
+            }
+        }
+        ipc_server_closeconn(srv);
+    }
+    g_supquit = 1;
+    ipc_server_destroy(srv);
+    log_msg("sup: control interface closed");
+}
+
+static DWORD WINAPI serve_thr(LPVOID p)
+{
+    (void)p;
+    serve_loop();
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* service entry                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -227,11 +483,34 @@ static void WINAPI service_main(DWORD argc, char **argv)
             ", configuration file: %s", conf);
 
     report_status(SERVICE_RUNNING, 0);
-    run_all(conf);
 
-    /* Stay running until the SCM asks us to stop or the system shuts
-     * down; the launched applications keep running. */
-    WaitForSingleObject(g_stop, INFINITE);
+    /* supervisor mode: keep the model + handles and serve the control
+     * interface so user processes can start/stop/restart/status apps */
+    if (sup_load(conf) == 0) {
+        HANDLE th;
+        sup_boot();
+        th = CreateThread(NULL, 0, serve_thr, NULL, 0, NULL);
+        WaitForSingleObject(g_stop, INFINITE);
+        /* release the accept loop: a self client sends QUIT */
+        {
+            ipc_conn *c = ipc_client_open(g_ep);
+            char      r[64];
+            if (c) {
+                ipc_client_call(c, "QUIT", r, sizeof(r));
+                ipc_client_close(c);
+            }
+            g_supquit = 1;
+            if (th) {
+                WaitForSingleObject(th, 3000);
+                CloseHandle(th);
+            }
+        }
+    } else {
+        log_msg("service: configuration load failed; no apps started");
+    }
+
+    /* Stay running until the SCM asks us to stop; the launched
+     * applications are intentionally left running. */
     report_status(SERVICE_STOPPED, 0);
 }
 
@@ -307,15 +586,19 @@ int svc_control(const char *what, int needs_create)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "usage: %s [command] [-c config-file]\n"
+        "usage: %s [command] [-c config-file] [-s control-endpoint]\n"
         "  default config: <exe dir>\\..\\conf\\startup.conf\n"
         "  (no command)  open the configuration/status GUI window\n"
         "  service       run as Windows service (SCM entry point)\n"
-        "  install       create service '%s' with automatic start\n"
+        "  serve         foreground supervisor with the control IPC\n"
+        "  install       create service '%s' with automatic start\n",
+        prog, SERVICE_NAME);
+    fprintf(stderr,
         "  uninstall     remove the service\n"
         "  start | stop  control the installed service\n"
-        "  run | console run the launcher in this console (debug)\n",
-        prog, SERVICE_NAME);
+        "  run | console run the launcher in this console (debug)\n"
+        "  -s NAME       control pipe name for 'app' commands "
+        "(env: BOOTLAUNCHER_CTL)\n");
     cli_usage(prog);
 }
 
@@ -326,6 +609,7 @@ int main(int argc, char **argv)
     char    *pos[MAX_POS];            /* positional words (command+args) */
     int      npos = 0;
     const char *conf_arg = NULL;
+    const char *ep_arg = NULL;
     char  conf[MAX_PATH * 2];
     char  exe[MAX_PATH];
     int   i;
@@ -333,9 +617,17 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             conf_arg = argv[++i];
+        } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
+            ep_arg = argv[++i];
         } else if (npos < MAX_POS) {
             pos[npos++] = argv[i];
         }
+    }
+
+    if (ep_arg) {
+        strncpy(g_ep, ep_arg, sizeof(g_ep) - 1);
+        g_ep[sizeof(g_ep) - 1] = '\0';
+        cli_set_endpoint(g_ep);
     }
 
     GetModuleFileNameA(NULL, exe, MAX_PATH);
@@ -368,6 +660,15 @@ int main(int argc, char **argv)
                         (unsigned long)e);
             return 2;
         }
+        return 0;
+    }
+
+    if (strcmp(pos[0], "serve") == 0) {
+        /* foreground supervisor: same control interface as the service,
+         * no SCM registration (for desktop use and testing) */
+        if (sup_load(conf) != 0) return 1;
+        sup_boot();
+        serve_loop();
         return 0;
     }
 

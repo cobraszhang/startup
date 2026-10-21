@@ -13,11 +13,96 @@
 #include "topo.h"
 #include "log.h"
 #include "version.h"
+#include "ipc.h"
 
 static const char *g_cmds[] = {
     "list", "order", "check", "run",
-    "add", "rm", "rename", "set", "dep", "help", "version"
+    "add", "rm", "rename", "set", "dep", "help", "version", "app"
 };
+
+/* control-channel endpoint override for the 'app' subcommand */
+static char g_endpoint[512];
+
+void cli_set_endpoint(const char *endpoint)
+{
+    if (!endpoint || !*endpoint) return;
+    strncpy(g_endpoint, endpoint, sizeof(g_endpoint) - 1);
+    g_endpoint[sizeof(g_endpoint) - 1] = '\0';
+}
+
+/* 'app' subcommands: forwarded to the running service process */
+static int cmd_app(int argc, char **argv)
+{
+    static const struct {
+        const char *sc;     /* subcommand as typed by the user   */
+        const char *verb;   /* protocol verb sent to the service */
+        int         named;  /* requires an application name      */
+    } tbl[] = {
+        { "ping",     "PING",    0 },
+        { "list",     "LIST",    0 },
+        { "status",   "STATUS",  0 },
+        { "start",    "START",   1 },
+        { "stop",     "STOP",    1 },
+        { "restart",  "RESTART", 1 },
+        { "shutdown", "QUIT",    0 }
+    };
+    char        ep[512], req[IPC_LINE_MAX], reply[8192];
+    ipc_conn   *c;
+    const char *name;
+    size_t      i, n;
+    int         got;
+
+    if (argc < 2) {
+        fprintf(stderr, "usage: app ping|list [name]|start|stop|restart"
+                        " <name>|status [name]|shutdown\n");
+        return 2;
+    }
+    for (i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++)
+        if (strcmp(argv[1], tbl[i].sc) == 0) break;
+    if (i >= sizeof(tbl) / sizeof(tbl[0])) {
+        fprintf(stderr, "app: unknown control subcommand '%s'\n", argv[1]);
+        return 2;
+    }
+    name = (argc >= 3) ? argv[2] : "";
+    if (tbl[i].named && !*name) {
+        fprintf(stderr, "usage: app %s <name>\n", tbl[i].sc);
+        return 2;
+    }
+
+    if (g_endpoint[0]) {
+        strncpy(ep, g_endpoint, sizeof(ep) - 1);
+        ep[sizeof(ep) - 1] = '\0';
+    } else {
+        ipc_default_endpoint(ep, sizeof(ep));
+    }
+
+    c = ipc_client_open(ep);
+    if (!c) {
+        log_msg("app: cannot reach the control service at %s "
+                "(is the service process running?)", ep);
+        return 3;
+    }
+
+    n = strlen(tbl[i].verb);
+    memcpy(req, tbl[i].verb, n);
+    if (*name) {
+        req[n++] = ' ';
+        strncpy(req + n, name, sizeof(req) - n - 2);
+        req[sizeof(req) - 2] = '\0';
+        n = strlen(req);
+    }
+    req[n] = '\0';
+
+    got = ipc_client_call(c, req, reply, sizeof(reply));
+    ipc_client_close(c);
+    if (got < 0) {
+        log_msg("app: control channel error");
+        return 3;
+    }
+    fputs(reply, stdout);
+    if (strncmp(reply, "OK", 2) != 0) return 1;
+    return 0;
+}
 
 int cli_is_known(const char *cmd)
 {
@@ -46,6 +131,10 @@ void cli_usage(const char *prog)
         "  dep del <a> <b>          remove that dependency\n"
         "  help                     this text\n"
         "  version                  print the release version\n");
+    fprintf(stderr,
+        "  app ping|list|status [name] |start|stop|restart <name>|shutdown\n"
+        "                        control running apps via the service "
+        "process (IPC)\n");
     fprintf(stderr, "example: %s list   (config selected with -c FILE)\n",
             prog);
 }
@@ -114,6 +203,8 @@ int cli_main(int argc, char **argv, const char *prog,
         printf("AppBootLauncher %s\n", APPBOOT_VERSION);
         return 0;
     }
+    if (strcmp(cmd, "app") == 0)
+        return cmd_app(argc, argv);
     if (strcmp(cmd, "run") == 0)
         return run_fn(confpath);
 

@@ -6,13 +6,18 @@ Description=Boot-time application launcher (dependency ordered)
 After=local-fs.target network.target
 
 [Service]
-Type=oneshot
-# The launcher forks applications and exits; without KillMode=process
-# systemd would kill the still-running children with the unit's cgroup.
-KillMode=process
+Type=simple
+# Supervisor mode: boot everything at startup, then stay resident and
+# serve the control interface (/tmp/bootlauncher.ctl, env
+# BOOTLAUNCHER_CTL) for user processes:
+#   bootlauncher app start|stop|restart <name> | status [name] | list | ping
+# KillMode=mixed: `systemctl stop' sends SIGTERM to the supervisor only;
+# the application processes it launched keep running.
+KillMode=mixed
+TimeoutStopSec=10
 # no -c needed: the binary reads <exe dir>/../conf/startup.conf
 # = /usr/local/conf/startup.conf
-ExecStart=/usr/local/bin/bootlauncher
+ExecStart=/usr/local/bin/bootlauncher serve
 
 [Install]
 WantedBy=multi-user.target
