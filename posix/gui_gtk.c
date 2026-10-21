@@ -23,6 +23,7 @@
 #include "log.h"
 #include "cli.h"
 #include "version.h"
+#include "posix_app.h"
 
 static app_t *g_apps = NULL;      /* in-memory model (shared struct) */
 static int    g_n = 0;
@@ -36,6 +37,7 @@ static cli_run_fn  g_run_fn = NULL;
 
 static GtkWidget   *w_app_tree, *w_deps_tree;
 static GtkWidget   *e_name, *e_cmd, *sp_wait, *tv_status;
+static GtkWidget   *g_win;                 /* top-level (dialog parent) */
 static GtkListStore *store_apps, *store_deps;
 static GtkTextBuffer *status_buf;
 
@@ -480,6 +482,63 @@ static GtkWidget *mk_scrolled_tree(GtkListStore **store_out,
     return sw;
 }
 
+/* file picker for the command line field: the configuration keeps
+ * only the quoted file path; the interpreter (if any) is prepended
+ * later, at execution time (app_build_cmdline). */
+static void on_browse(GtkWidget *b, gpointer u)
+{
+    static const char *pats[] =
+        { "*.sh", "*.bash", "*.py", "*.pl", "*.rb", "*.js", "*.lua",
+          NULL };
+    GtkWidget *dlg;
+    GtkFileFilter *flt;
+    char       probe[4096];
+    char       quoted[4096];
+    char      *path;
+    int        i;
+
+    (void)b; (void)u;
+    dlg = gtk_file_chooser_dialog_new("选择应用或脚本",
+              GTK_WINDOW(g_win), GTK_FILE_CHOOSER_ACTION_OPEN,
+              "取消", GTK_RESPONSE_CANCEL,
+              "打开", GTK_RESPONSE_ACCEPT, NULL);
+
+    flt = gtk_file_filter_new();
+    gtk_file_filter_set_name(GTK_FILE_FILTER(flt),
+        "脚本 (*.sh *.bash *.py *.pl *.rb *.js *.lua)");
+    for (i = 0; pats[i]; i++)
+        gtk_file_filter_add_pattern(GTK_FILE_FILTER(flt), pats[i]);
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg),
+                                GTK_FILE_FILTER(flt));
+    flt = gtk_file_filter_new();
+    gtk_file_filter_set_name(GTK_FILE_FILTER(flt), "所有文件 (*)");
+    gtk_file_filter_add_pattern(GTK_FILE_FILTER(flt), "*");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg),
+                                GTK_FILE_FILTER(flt));
+
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) != GTK_RESPONSE_ACCEPT) {
+        gtk_widget_destroy(dlg);
+        return;                            /* cancelled: keep as is */
+    }
+    path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+    gtk_widget_destroy(dlg);
+    if (!path) return;
+
+    sprintf(quoted, "\"%s\"", path);
+    if (app_build_cmdline(quoted, probe, sizeof(probe)) != 0) {
+        log_msg("浏览：系统中未找到可执行该脚本的方式（不可执行且无对应"
+                "运行时），未写入命令行。");
+        g_free(path);
+        return;
+    }
+    gtk_entry_set_text(GTK_ENTRY(e_cmd), quoted);
+    if (strcmp(probe, quoted) != 0)
+        log_msg("浏览：已选择；执行时将实际运行为：%s", probe);
+    else
+        log_msg("浏览：已选择 %s", path);
+    g_free(path);
+}
+
 int gui_main(const char *confpath, cli_run_fn run_fn)
 {
     GtkWidget *win, *vroot, *hbox, *grid, *label, *sw, *hbtn;
@@ -509,6 +568,7 @@ int gui_main(const char *confpath, cli_run_fn run_fn)
     }
 
     win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    g_win = win;
     sprintf(ttl, "开机启动应用管理器 - startup v%s",
             APPBOOT_VERSION);
     gtk_window_set_title(GTK_WINDOW(win), ttl);
@@ -571,7 +631,9 @@ int gui_main(const char *confpath, cli_run_fn run_fn)
                     0, 1, 1, 1);
     e_cmd = gtk_entry_new();
     gtk_widget_set_hexpand(e_cmd, TRUE);
-    gtk_grid_attach(GTK_GRID(grid), e_cmd, 1, 1, 3, 1);
+    gtk_grid_attach(GTK_GRID(grid), e_cmd, 1, 1, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid),
+        mk_button("浏览...", G_CALLBACK(on_browse)), 3, 1, 1, 1);
 
     gtk_grid_attach(GTK_GRID(grid),
         gtk_label_new("依赖（按住 Ctrl/Shift 多选）："), 0, 2, 1, 1);

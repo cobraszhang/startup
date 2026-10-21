@@ -246,6 +246,61 @@ rm -f "$CTL_S" "$CTL_C" /tmp/posix-t10a.log /tmp/posix-t10b.log \
       /tmp/posix-t10c.log /tmp/posix-t10d.log /tmp/posix-t10e.log \
       /tmp/posix-t10f.log /tmp/posix-t10g.log /tmp/posix-t10-srv.log
 
+echo "== 11. interpreter resolution (config stores script paths only) =="
+SD="/tmp/bl-scr-$$"
+SC_S="/tmp/bl-scr-$$.sock"
+mkdir -p "$SD"
+printf '#!/bin/sh\nsleep 123\n' > "$SD/noexec.sh"
+printf '#!/bin/sh\nsleep 456\n' > "$SD/direct.sh"
+chmod 755 "$SD/direct.sh"
+printf 'import time\ntime.sleep(789)\n' > "$SD/task.py"
+printf 'no runtime here\n' > "$SD/odd.zzz"
+cat > "$SD/scr.conf" <<EOF
+[noexec]
+cmd = "$SD/noexec.sh"
+
+[direct]
+cmd = "$SD/direct.sh"
+
+[odd]
+cmd = "$SD/odd.zzz"
+EOF
+HAVE_PY=1
+command -v python3 >/dev/null 2>&1 || HAVE_PY=0
+if [ "$HAVE_PY" = 1 ]; then
+  printf '\n[pyscript]\ncmd = "%s/task.py"\n' "$SD" >> "$SD/scr.conf"
+fi
+rm -f "$SC_S"
+BOOTLAUNCHER_CTL="$SC_S" ./build/release/startup -c "$SD/scr.conf" serve \
+    >/tmp/posix-t11-srv.log 2>&1 &
+SRV2=$!
+i=0
+while [ ! -S "$SC_S" ] && [ "$i" -lt 50 ]; do i=$((i + 1)); sleep 0.1; done
+SAP() { BOOTLAUNCHER_CTL="$SC_S" ./build/release/startup app "$@"; }
+
+SAP status >/tmp/posix-t11a.log 2>&1
+SAP start odd >/tmp/posix-t11b.log 2>&1; rco=$?
+ok=1
+if grep -Eq '^  noexec +running' /tmp/posix-t11a.log \
+   && grep -Eq '^  direct +running' /tmp/posix-t11a.log \
+   && grep -Eq '^  odd +not-started' /tmp/posix-t11a.log \
+   && [ "$rco" = 1 ] && grep -q "^ERR launch failed for 'odd'" \
+        /tmp/posix-t11b.log
+then ok=0; fi
+if [ "$HAVE_PY" = 1 ] \
+   && ! grep -Eq '^  pyscript +running' /tmp/posix-t11a.log
+then ok=1; fi
+report "shebang runs direct; non-exec .sh via /bin/sh, .py via python3; unresolvable .zzz refused" $ok
+
+SAP stop noexec  >/dev/null 2>&1
+SAP stop direct  >/dev/null 2>&1
+if [ "$HAVE_PY" = 1 ]; then SAP stop pyscript >/dev/null 2>&1; fi
+SAP shutdown >/dev/null 2>&1
+wait $SRV2
+pkill -x sleep 2>/dev/null
+rm -rf "$SD" "$SC_S" /tmp/posix-t11a.log /tmp/posix-t11b.log \
+       /tmp/posix-t11-srv.log
+
 
 echo
 echo "========  $PASS passed, $FAIL failed  ========"

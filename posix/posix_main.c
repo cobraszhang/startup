@@ -40,6 +40,8 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <time.h>
+#include <limits.h>
+#include <sys/stat.h>
 
 #include "cfg.h"
 #include "topo.h"
@@ -161,19 +163,155 @@ static void sleep_ms(unsigned ms)
     nanosleep(&ts, NULL);
 }
 
+/* ------------------------------------------------------------------ */
+/* execution-time interpreter resolution (documented in posix_app.h)   */
+/* ------------------------------------------------------------------ */
+
+static void lower_copy(char *dst, size_t dstsz, const char *src)
+{
+    size_t i;
+    for (i = 0; i + 1 < dstsz && src[i]; i++) {
+        char c = src[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        dst[i] = c;
+    }
+    dst[i] = '\0';
+}
+
+static void passthrough(const char *stored, char *out, size_t outsz)
+{
+    strncpy(out, stored, outsz - 1);
+    out[outsz - 1] = '\0';
+}
+
+/* map a file extension to the interpreter that can run it */
+static const char *interp_for(const char *path)
+{
+    static const char *tab[][2] = {
+        { "sh",   "/bin/sh"   }, { "bash", "/bin/bash" },
+        { "py",   "python3"   }, { "pl",   "perl"      },
+        { "rb",   "ruby"      }, { "js",   "node"      },
+        { "lua",  "lua"       }, { NULL,   NULL        }
+    };
+    char        ext[16];
+    const char *dot = strrchr(path, '.');
+    int         i;
+
+    if (!dot) return NULL;
+    lower_copy(ext, sizeof(ext), dot + 1);
+    for (i = 0; tab[i][0]; i++)
+        if (strcmp(ext, tab[i][0]) == 0) return tab[i][1];
+    return NULL;
+}
+
+/* locate an interpreter (PATH search); 1 = available, 0 = not */
+static int find_interp(const char *name, char *out, size_t outsz)
+{
+    char        full[PATH_MAX];
+    const char *pathenv = getenv("PATH");
+    const char *p, *q;
+
+    if (strchr(name, '/')) {
+        if (access(name, X_OK) == 0) {
+            if (strlen(name) >= outsz) return 0;
+            strcpy(out, name);
+            return 1;
+        }
+        return 0;
+    }
+    if (!pathenv) pathenv = "/usr/local/bin:/usr/bin:/bin";
+    p = pathenv;
+    while (*p) {
+        q = strchr(p, ':');
+        if (!q) q = p + strlen(p);
+        if (q == p)
+            strncpy(full, name, sizeof(full) - 1);      /* empty = cwd */
+        else
+            sprintf(full, "%.*s/%s", (int)(q - p), p, name);
+        full[sizeof(full) - 1] = '\0';
+        if (access(full, X_OK) == 0) {
+            if (strlen(full) >= outsz) return 0;
+            strcpy(out, full);
+            return 1;
+        }
+        p = q;
+        if (*p == ':') p++;
+    }
+    return 0;
+}
+
+int app_build_cmdline(const char *stored, char *out, size_t outsz)
+{
+    char        path[PATH_MAX];
+    char        interp[256];
+    const char *p = stored;
+    size_t      i;
+
+    /* only a lone path (quoted or not) is interpreted; anything with
+     * extra arguments is treated as a full command line */
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '"') {
+        p++;
+        i = 0;
+        while (*p && *p != '"' && i + 1 < sizeof(path)) path[i++] = *p++;
+        if (*p != '"') { passthrough(stored, out, outsz); return 0; }
+        path[i] = '\0';
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p) { passthrough(stored, out, outsz); return 0; }
+    } else {
+        if (!*p || strpbrk(p, " \t\"'`$&;|<>()")) {
+            passthrough(stored, out, outsz);
+            return 0;
+        }
+        strncpy(path, p, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    }
+
+    /* an executable file runs as stored (kernel honors the shebang) */
+    if (access(path, X_OK) == 0) {
+        passthrough(stored, out, outsz);
+        return 0;
+    }
+    /* nonexistent path: untouched (shell commands, builtins, ...) */
+    if (access(path, F_OK) != 0) {
+        passthrough(stored, out, outsz);
+        return 0;
+    }
+
+    /* existing but not executable: prepend the interpreter for its
+     * extension, if that runtime is actually installed */
+    {
+        const char *want = interp_for(path);
+        if (!want || !find_interp(want, interp, sizeof(interp)))
+            return -1;
+        if (strlen(interp) + strlen(path) + 6 >= outsz) return -1;
+        sprintf(out, "%s \"%s\"", interp, path);
+        return 0;
+    }
+}
+
 /* start one application through the shell; parent does not wait */
 static int launch_app(const app_t *a)
 {
-    pid_t p = fork();
+    char  cmdline[4096];
+    pid_t p;
+
+    if (app_build_cmdline(a->cmd, cmdline, sizeof(cmdline)) != 0) {
+        log_msg("launch: no interpreter available for '%s' (cmd='%s')",
+                a->name, a->cmd);
+        return -1;
+    }
+    p = fork();
 
     if (p < 0) {
         log_msg("launch: fork failed for '%s'", a->name);
         return -1;
     }
     if (p == 0) {
-        execl("/bin/sh", "sh", "-c", a->cmd, (char *)NULL);
+        execl("/bin/sh", "sh", "-c", cmdline, (char *)NULL);
         /* only reached when exec failed */
-        fprintf(stderr, "exec '%s' failed\n", a->cmd);
+        fprintf(stderr, "exec '%s' failed\n", cmdline);
         _exit(127);
     }
     log_msg("launch: started '%s' pid=%ld", a->name, (long)p);
@@ -268,15 +406,23 @@ static int sup_load(const char *confpath)
 
 static int sup_launch(int i)
 {
-    pid_t p = fork();
+    char  cmdline[4096];
+    pid_t p;
+
+    if (app_build_cmdline(g_sapps[i].cmd, cmdline, sizeof(cmdline)) != 0) {
+        log_msg("sup: no interpreter available for '%s' (cmd='%s')",
+                g_sapps[i].name, g_sapps[i].cmd);
+        return -1;
+    }
+    p = fork();
 
     if (p < 0) {
         log_msg("sup: fork failed for '%s'", g_sapps[i].name);
         return -1;
     }
     if (p == 0) {
-        execl("/bin/sh", "sh", "-c", g_sapps[i].cmd, (char *)NULL);
-        fprintf(stderr, "exec '%s' failed\n", g_sapps[i].cmd);
+        execl("/bin/sh", "sh", "-c", cmdline, (char *)NULL);
+        fprintf(stderr, "exec '%s' failed\n", cmdline);
         _exit(127);
     }
     g_srt[i].pid   = p;
