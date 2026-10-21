@@ -453,6 +453,23 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
   （即官方 `dsh --profile web`：常驻 Web/网关 surface，无窗口；`--port`/`--no-open` 可选；
   认证 URL 打印到 stdout）。实测：独立端口下启动、无窗口常驻、带 token 的 URL 经
   `cmd /c … > 日志 2>&1` 包装落盘、HTTP 401（未认证探测的正常应答）、停止干净。
+- **网关 profile 与桌面配置/会话的共享**：DSH 的配置与插件组合按 **profile 隔离**
+  （`$DSH_HOME\profiles\<名称>\`：`package.json` 的 bundles + 用户层 `cordis.patch.yml`），
+  内置 `web` 模板不含桌面 profile 的插件与设置；会话与凭据则在 **home 级共享**
+  （`$DSH_HOME\sessions` 按工作区目录索引）。要点：
+  - 桌面 profile 的核心 bundle 本就是 `dsh-web-app`（桌面 = 同一网关 + Electron 壳），
+    故**把桌面 profile 整目录复制为自定义名**（如 `profiles\gw`，改 package.json 的
+    name）即可让网关继承全部插件、模型 provider、默认模型与 remote-web-ui 配置；
+    `desktop` 名字保留给 Electron，CLI 拒绝直接 boot。
+  - profile 补丁层（含插件的“managed block”）**优先于 CLI 旗标**：实测 `--port` 被
+    补丁里的 webserver 端口覆盖——端口等设置以 profile 为准，别再传 `--port`。
+  - **默认工作区 = 启动进程的工作目录**，这决定会话列表初始看到哪个工作区的记录；
+    服务启动的应用 cwd 是系统目录，需在 cmd 包装里先 `cd /d <工作区>`（无空格路径可
+    不加引号；`cmd /c cd /d D:\x&& "exe" …` 为可安全解析的标准形式）。
+  - 桌面与网关同时开会争抢同一 webserver 端口（择一运行）；桌面端改了设置后可再
+    `copy profiles\desktop\cordis.patch.yml profiles\gw\` 同步，或直接在网关界面里改
+    （写回 gw 自己的补丁层）。实测：`--profile gw` 完整启动全部 7 个 bundle，
+    打印带 token 的认证 URL，LAN 暴露，root 页 HTTP 200。
 - **开机启动次序**：install 自动把服务设为“自动(延迟启动)”——SCM 完成全部普通自启动
   服务后才拉起本服务（属开机流程，先于任何用户登录；手动 start 不受影响）。实测
   install 后 `QueryServiceConfig2` 回读 `fDelayedAutostart=TRUE`，日志打印确认；
