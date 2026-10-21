@@ -50,7 +50,7 @@ rc /r /fo appboot_cl.res "%SRC%appboot.rc"
 if errorlevel 1 (echo rc.exe FAILED & popd & exit /b 1)
 cl /nologo /TC /W3 /Zi /Od /D WIN32 /D _CONSOLE /D_DEBUG /I"%CORE%" ^
    %SHARED% ^
-   /link appboot_cl.res advapi32.lib user32.lib gdi32.lib kernel32.lib /DEBUG ^
+   /link /MACHINE:X86 appboot_cl.res advapi32.lib user32.lib gdi32.lib kernel32.lib /DEBUG ^
    /OUT:startup-cl.exe
 set RC=%ERRORLEVEL%
 popd
@@ -62,7 +62,7 @@ rc /r /fo appboot_cl.res "%SRC%appboot.rc"
 if errorlevel 1 (echo rc.exe FAILED & popd & exit /b 1)
 cl /nologo /TC /W3 /O2 /D WIN32 /D _CONSOLE /DNDEBUG /I"%CORE%" ^
    %SHARED% ^
-   /link appboot_cl.res advapi32.lib user32.lib gdi32.lib kernel32.lib /OUT:startup-cl.exe
+   /link /MACHINE:X86 appboot_cl.res advapi32.lib user32.lib gdi32.lib kernel32.lib /OUT:startup-cl.exe
 set RC=%ERRORLEVEL%
 popd
 if not "%RC%"=="0" (echo MSVC release build FAILED & exit /b 1)
