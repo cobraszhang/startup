@@ -8,6 +8,8 @@ typedef struct app {
     char **deps;     /* names that must be started before this app     */
     int    ndeps;    /* number of entries in deps                      */
     int    wait_ms;  /* pause after starting this app (before others)  */
+    char  *cwd;      /* initial working directory, NULL = inherit      */
+    char  *output;   /* file for child stdout+stderr, NULL = none      */
 } app_t;
 
 /* Load configuration from file. Returns 0 on success and stores an
@@ -31,7 +33,8 @@ int  cfg_remove(app_t **apps, int *n, const char *name);
 /* Rename entry; other apps' dependency references follow. */
 int  cfg_rename(app_t *apps, int n, const char *oldname, const char *newname);
 
-/* Set "cmd" or "wait" field of one app. */
+/* Set "cmd", "wait", "cwd" or "output" field of one app (empty value
+ * clears cwd/output). */
 int  cfg_set_field(app_t *a, const char *key, const char *val);
 
 /* Add/remove a dependency; dep must name an existing app (add). */

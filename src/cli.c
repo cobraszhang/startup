@@ -217,6 +217,10 @@ int cli_main(int argc, char **argv, const char *prog,
         for (i = 0; i < n; i++) {
             printf("%s\n", apps[i].name);
             printf("  cmd  = %s\n", apps[i].cmd);
+            if (apps[i].cwd)
+                printf("  cwd  = %s\n", apps[i].cwd);
+            if (apps[i].output)
+                printf("  out  = %s\n", apps[i].output);
             printf("  deps =");
             for (k = 0; k < apps[i].ndeps; k++)
                 printf(" %s", apps[i].deps[k]);

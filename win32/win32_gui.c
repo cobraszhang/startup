@@ -2,7 +2,8 @@
  * the executable is run with no arguments.
  *
  * Editor model: application list + one control per parameter
- * (name, command line, wait ms, dependencies multi-select), plus
+ * (name, command line, wait ms, working directory, output capture
+ * file, dependencies multi-select), plus
  * add/delete, save, dependency validation, ordered launch and full
  * service control. All core log output is routed to the status box.
  * Model editing goes through the shared cfg_* helpers, so the GUI and
@@ -49,10 +50,13 @@
 #define ID_APPSTOP   213
 #define ID_APPRESTART 214
 #define ID_APPREFRESH 215
+#define ID_F_CWD      216
+#define ID_F_OUT      217
 
 static HWND  g_list = NULL, g_depslb = NULL, g_stated = NULL;
 static HWND  g_nameed = NULL, g_cmded = NULL, g_waited = NULL;
 static HWND  g_proclv = NULL;
+static HWND  g_cwded = NULL, g_outed = NULL;
 static HFONT g_font_fixed = NULL;
 static char  g_confpath[MAX_PATH * 2];
 
@@ -213,12 +217,16 @@ static void fill_form(int i)
         SetWindowTextA(g_nameed, "");
         SetWindowTextA(g_cmded, "");
         SetWindowTextA(g_waited, "");
+        SetWindowTextA(g_cwded, "");
+        SetWindowTextA(g_outed, "");
         return;
     }
     SetWindowTextA(g_nameed, g_apps[i].name);
     SetWindowTextA(g_cmded, g_apps[i].cmd ? g_apps[i].cmd : "");
     sprintf(num, "%d", g_apps[i].wait_ms);
     SetWindowTextA(g_waited, num);
+    SetWindowTextA(g_cwded, g_apps[i].cwd ? g_apps[i].cwd : "");
+    SetWindowTextA(g_outed, g_apps[i].output ? g_apps[i].output : "");
 
     /* dependency candidates: every other app */
     for (j = 0; j < g_n; j++) {
@@ -236,7 +244,7 @@ static void fill_form(int i)
 /* write the current form back into model entry g_sel */
 static void apply_form(void)
 {
-    char *name, *cmd, *waitstr;
+    char *name, *cmd, *waitstr, *cwdstr, *outstr;
     int   i = g_sel, j, cnt;
 
     if (i < 0) return;
@@ -244,8 +252,11 @@ static void apply_form(void)
     name = edit_text(g_nameed);
     cmd  = edit_text(g_cmded);
     waitstr = edit_text(g_waited);
-    if (!name || !cmd || !waitstr) {
+    cwdstr = edit_text(g_cwded);
+    outstr = edit_text(g_outed);
+    if (!name || !cmd || !waitstr || !cwdstr || !outstr) {
         free(name); free(cmd); free(waitstr);
+        free(cwdstr); free(outstr);
         status_printf("内存不足");
         return;
     }
@@ -254,6 +265,7 @@ static void apply_form(void)
         status_printf("名称不能为空，已还原");
         SetWindowTextA(g_nameed, g_apps[i].name);
         free(name); free(cmd); free(waitstr);
+        free(cwdstr); free(outstr);
         return;
     }
     if (strcmp(name, g_apps[i].name) != 0) {
@@ -262,6 +274,7 @@ static void apply_form(void)
             status_printf("名称 '%s' 已存在或不合法，未改名", name);
             SetWindowTextA(g_nameed, g_apps[i].name);
             free(name); free(cmd); free(waitstr);
+        free(cwdstr); free(outstr);
             return;
         }
     }
@@ -269,9 +282,12 @@ static void apply_form(void)
     if (cfg_set_field(&g_apps[i], "cmd", cmd) != 0) {
         status_printf("应用 '%s' 的命令行不能为空", g_apps[i].name);
         free(name); free(cmd); free(waitstr);
+        free(cwdstr); free(outstr);
         return;
     }
     cfg_set_field(&g_apps[i], "wait", waitstr);
+    cfg_set_field(&g_apps[i], "cwd", cwdstr);
+    cfg_set_field(&g_apps[i], "output", outstr);
 
     /* dependencies from the multi-select listbox */
     cnt = (int)SendMessageA(g_depslb, LB_GETCOUNT, 0, 0);
@@ -298,6 +314,7 @@ static void apply_form(void)
     }
 
     free(name); free(cmd); free(waitstr);
+        free(cwdstr); free(outstr);
 }
 
 static void add_app(void)
@@ -463,7 +480,7 @@ static void lv_setup(HWND p, HFONT f)
 
     g_proclv = CreateWindowExA(WS_EX_CLIENTEDGE, "SysListView32", "",
         WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
-        10, 394, 760, 120, p, (HMENU)(LONG_PTR)ID_PROCLIST,
+        10, 462, 760, 120, p, (HMENU)(LONG_PTR)ID_PROCLIST,
         GetModuleHandleA(NULL), NULL);
     if (!g_proclv) return;
     SendMessageA(g_proclv, WM_SETFONT, (WPARAM)f, TRUE);
@@ -631,33 +648,37 @@ static void on_create(HWND h)
     mk_label(h, "命令行：", 225, 84, 200, fui);
     g_cmded = mk_edit(h, ID_F_CMD, 225, 102, 572, 24, 0, g_font_fixed);
     mk_button(h, "浏览...", ID_BROWSE, 802, 101, 72, fui);
-    mk_label(h, "依赖（多选：Ctrl/Shift 点击）：", 225, 138, 300, fui);
-    g_depslb = mk_listbox(h, ID_DEPSLIST, 225, 156, 300, 142,
+    mk_label(h, "工作目录（留空=继承；决定数据/会话目录）：", 225, 138, 400, fui);
+    g_cwded = mk_edit(h, ID_F_CWD, 225, 156, 572, 24, 0, g_font_fixed);
+    mk_label(h, "输出捕获文件（留空=不捕获；stdout+stderr 追加写入）：", 225, 192, 460, fui);
+    g_outed = mk_edit(h, ID_F_OUT, 225, 210, 572, 24, 0, g_font_fixed);
+    mk_label(h, "依赖（多选：Ctrl/Shift 点击）：", 225, 246, 300, fui);
+    g_depslb = mk_listbox(h, ID_DEPSLIST, 225, 264, 300, 100,
                           LBS_MULTIPLESEL, fui);
 
     /* actions */
-    mk_button(h, "保存配置",     ID_SAVE,    10,  310, 90,  fui);
-    mk_button(h, "校验依赖顺序", ID_CHECK,   106, 310, 110, fui);
-    mk_button(h, "按序启动应用", ID_RUNNOW,  222, 310, 110, fui);
+    mk_button(h, "保存配置",     ID_SAVE,    10,  378, 90,  fui);
+    mk_button(h, "校验依赖顺序", ID_CHECK,   106, 378, 110, fui);
+    mk_button(h, "按序启动应用", ID_RUNNOW,  222, 378, 110, fui);
 
-    mk_button(h, "安装服务", ID_SVCI,    10,  344, 90, fui);
-    mk_button(h, "卸载服务", ID_SVCD,    106, 344, 90, fui);
-    mk_button(h, "启动服务", ID_SVCS,    202, 344, 90, fui);
-    mk_button(h, "停止服务", ID_SVCT,    298, 344, 90, fui);
-    mk_button(h, "刷新状态", ID_REFRESH, 394, 344, 90, fui);
+    mk_button(h, "安装服务", ID_SVCI,    10,  412, 90, fui);
+    mk_button(h, "卸载服务", ID_SVCD,    106, 412, 90, fui);
+    mk_button(h, "启动服务", ID_SVCS,    202, 412, 90, fui);
+    mk_button(h, "停止服务", ID_SVCT,    298, 412, 90, fui);
+    mk_button(h, "刷新状态", ID_REFRESH, 394, 412, 90, fui);
 
-    mk_label(h, "子应用进程控制（与运行中的服务进程通讯）：", 10, 378, 480, fui);
+    mk_label(h, "子应用进程控制（与运行中的服务进程通讯）：", 10, 446, 480, fui);
     lv_setup(h, fui);
-    mk_button(h, "启动应用",  ID_APPSTART,   780, 394, 104, fui);
-    mk_button(h, "停止应用",  ID_APPSTOP,    780, 424, 104, fui);
-    mk_button(h, "重启应用",  ID_APPRESTART, 780, 454, 104, fui);
-    mk_button(h, "刷新列表",  ID_APPREFRESH, 780, 484, 104, fui);
+    mk_button(h, "启动应用",  ID_APPSTART,   780, 462, 104, fui);
+    mk_button(h, "停止应用",  ID_APPSTOP,    780, 492, 104, fui);
+    mk_button(h, "重启应用",  ID_APPRESTART, 780, 522, 104, fui);
+    mk_button(h, "刷新列表",  ID_APPREFRESH, 780, 552, 104, fui);
 
-    mk_label(h, "状态 / 输出：", 10, 540, 200, fui);
+    mk_label(h, "状态 / 输出：", 10, 608, 200, fui);
     g_stated = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
         WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY |
         ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL,
-        10, 556, 864, 230, h, (HMENU)(LONG_PTR)ID_STATEDIT,
+        10, 624, 864, 230, h, (HMENU)(LONG_PTR)ID_STATEDIT,
         GetModuleHandleA(NULL), NULL);
     if (g_stated)
         SendMessageA(g_stated, WM_SETFONT, (WPARAM)g_font_fixed, TRUE);
@@ -745,7 +766,7 @@ int gui_main(const char *confpath)
                 APPBOOT_VERSION);
         hwnd = CreateWindowExA(0, wc.lpszClassName, ttl,
         WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 900, 830,
+        CW_USEDEFAULT, CW_USEDEFAULT, 900, 898,
             NULL, NULL, wc.hInstance, NULL);
     }
     if (!hwnd) return 1;

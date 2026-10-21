@@ -291,6 +291,24 @@ int app_build_cmdline(const char *stored, char *out, size_t outsz)
     }
 }
 
+/* child process after fork: per-app working directory and
+ * stdout/stderr capture, before the exec of the shell command */
+static void child_setup(const app_t *a)
+{
+    if (a->cwd && chdir(a->cwd) != 0) {
+        fprintf(stderr, "chdir '%s' failed for '%s'\n", a->cwd, a->name);
+        _exit(127);
+    }
+    if (a->output) {
+        int fd = open(a->output, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            if (fd > STDERR_FILENO) close(fd);
+        }
+    }
+}
+
 /* start one application through the shell; parent does not wait */
 static int launch_app(const app_t *a)
 {
@@ -309,6 +327,7 @@ static int launch_app(const app_t *a)
         return -1;
     }
     if (p == 0) {
+        child_setup(a);
         execl("/bin/sh", "sh", "-c", cmdline, (char *)NULL);
         /* only reached when exec failed */
         fprintf(stderr, "exec '%s' failed\n", cmdline);
@@ -421,6 +440,7 @@ static int sup_launch(int i)
         return -1;
     }
     if (p == 0) {
+        child_setup(&g_sapps[i]);
         execl("/bin/sh", "sh", "-c", cmdline, (char *)NULL);
         fprintf(stderr, "exec '%s' failed\n", cmdline);
         _exit(127);

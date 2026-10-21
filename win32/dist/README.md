@@ -110,6 +110,8 @@ deps = logging                            ; 必须先于本应用启动的名字
 [appserver]
 cmd = C:\tools\appserver.exe
 deps = database, logging
+cwd = D:\tools                        ; 初始工作目录（可选；含空格加引号）
+output = D:\logs\appserver.log        ; 子进程 stdout+stderr 追加到文件（可选）
 ```
 
 语义：
@@ -118,6 +120,8 @@ deps = database, logging
 - 依赖了不存在的名字 → 报错退出（不启动任何应用）。
 - 存在依赖环 → 报错并列出环上的应用，退出。
 - `wait` 是启动某应用后的缓冲时间，用于给依赖它的下一个应用留出初始化时间；Win32 版中该等待可被服务停止请求打断。
+- `cwd` 设定应用的初始工作目录（留空 = 继承启动方）。很多程序把数据、日志、会话目录解析到工作目录上——POSIX 侧子进程先 `chdir`（失败则该应用不启动并报错），Win32 侧传给 `CreateProcess` 的 `lpCurrentDirectory`。
+- `output` 把子进程的 stdout+stderr **追加**写入该文件（POSIX 用 `dup2`，Win32 用 `STARTF_USESTDHANDLES`；文件打开失败仍照常启动，仅记一条日志）。有了它就不再需要 `cmd /c … > 日志` 这类包装——**包装会让 supervisor 监控到包装进程而非应用主进程**，状态与控制都会失真。
 - 已启动的应用在停止/卸载服务时**不会被杀掉**（有意为之，应用生命周期归其自身管理）。
 
 ## 命令行管理接口（CLI，两版通用）
@@ -127,7 +131,7 @@ deps = database, logging
 （GUI 的“保存配置”走同一函数，两边产出逐字节一致）。
 
 ```
-list                     列出所有应用（cmd/deps/wait）
+list                     列出所有应用（cmd/deps/wait/cwd/output）
 order                    打印按依赖解析出的启动顺序
 check                    仅校验配置（解析 + 拓扑）
 run                      校验后按序启动全部应用
@@ -136,6 +140,8 @@ rm <name>                删除应用（其他应用对它的依赖引用一并�
 rename <old> <new>       改名（其他应用的依赖引用自动跟随）
 set <name> cmd <line>    修改命令行
 set <name> wait <ms>     修改启动后等待
+set <name> cwd <path>    修改工作目录（传空字符串 = 清除）
+set <name> output <p>    修改输出捕获文件（传空字符串 = 清除）
 dep add <a> <b>          让 a 依赖 b（b 必须已存在）
 dep del <a> <b>          删除该依赖
 help                     子命令帮助
@@ -441,6 +447,15 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 
 ## 已通过的验证
 
+- **应用主进程直控（新增 `cwd`/`output` 字段）**：被 `cmd /c … > 日志` 包装的应用，
+  supervisor 监控的是**包装进程**——cmd 对 GUI 子系统程序不加等待、立即退出，导致
+  状态恒为已退出、stop/restart 都控制不到真正的应用（实机现象：“DSH 进程主服务监控
+  不了”）。修复：配置支持 `cwd`（lpCurrentDirectory / chdir）与 `output`
+  （STARTF_USESTDHANDLES / dup2 追加捕获），应用得以**不加包装直接启动**。实测：
+  `app status` 的 pid 即监听端口的应用主进程；`app stop` 后端口立刻释放；
+  `app restart` 后新 pid 重新监听；一次性测试程序两平台验证 `CWD=` 断言与
+  stdout+stderr 落盘；POSIX 套件新增第 12 节（带引号/不带引号路径、CLI
+  set/list/保存重载、空值清除）22/22 全绿。Win32 配置窗口同步增加两个编辑字段。
 - **用户环境块**（真机根因修复）：实机上服务以用户令牌启动的应用“启动即退出、
   重定向日志为空”——`CreateProcessAsUser` 传 `lpEnvironment=NULL` 时环境块继承的是
   服务的 **LocalSystem** 环境，`USERPROFILE` 指向 `C:\Windows\System32\config\systemprofile`
@@ -552,3 +567,5 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 - 控制接口单实例串行处理（同一时刻一个客户端）；模型只在服务进程启动时载入，
   改配置后需重启服务进程生效。
 - 仅 ANSI（A 系）Win32 API；路径含非 ASCII 时建议配置文件与程序目录使用 ASCII 路径。
+- POSIX 的 GTK 配置窗口暂不编辑 `cwd`/`output` 字段（打开含这两个字段的配置再保存，
+  字段经共享模型原样保留，不丢失）；Win32 配置窗口与 CLI 均可编辑。

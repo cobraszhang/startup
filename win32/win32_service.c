@@ -186,7 +186,8 @@ typedef BOOL (WINAPI *wts_query_user_token_fn)(DWORD, HANDLE *);
 typedef BOOL (WINAPI *create_environment_block_fn)(LPVOID *, HANDLE, BOOL);
 typedef BOOL (WINAPI *destroy_environment_block_fn)(LPVOID);
 
-static int spawn_app(const char *cmdline, PROCESS_INFORMATION *pi)
+static int spawn_app(const char *cmdline, const char *cwd,
+                     const char *output, PROCESS_INFORMATION *pi)
 {
     wts_active_session_fn     pActive = (wts_active_session_fn)0;
     wts_query_user_token_fn   pToken  = (wts_query_user_token_fn)0;
@@ -195,6 +196,9 @@ static int spawn_app(const char *cmdline, PROCESS_INFORMATION *pi)
     static HMODULE            hWts    = NULL;
     static HMODULE            hUe     = NULL;
     LPVOID                    env     = NULL;
+    HANDLE                    hout    = NULL;
+    SECURITY_ATTRIBUTES       sa;
+    BOOL                      inherit = FALSE;
     HMODULE                   hK;
     DWORD                     session = 0xFFFFFFFF;
     HANDLE                    tok  = NULL, ptok = NULL;
@@ -205,6 +209,32 @@ static int spawn_app(const char *cmdline, PROCESS_INFORMATION *pi)
 
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
+
+    if (output) {
+        /* capture the child's stdout+stderr into the file; appending so
+         * repeated service starts do not destroy earlier content.
+         * Without this the process started with CREATE_NO_WINDOW has no
+         * console at all and the app's own log output is lost. */
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = NULL;
+        sa.bInheritHandle = TRUE;
+        hout = CreateFileA(output, GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hout == INVALID_HANDLE_VALUE) {
+            log_msg("launch: cannot open output file '%s' err=%lu "
+                    "(starting without redirection)",
+                    output, (unsigned long)GetLastError());
+            hout = NULL;
+        } else {
+            SetFilePointer(hout, 0, NULL, FILE_END);
+            si.dwFlags   = STARTF_USESTDHANDLES;
+            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+            si.hStdOutput = hout;
+            si.hStdError  = hout;
+            inherit = TRUE;
+        }
+    }
 
     /* transfer through a union: keeps strict C89 compilers from
      * warning about function-pointer casts of GetProcAddress */
@@ -245,16 +275,17 @@ static int spawn_app(const char *cmdline, PROCESS_INFORMATION *pi)
         if (pEnvBlk && !pEnvBlk(&env, ptok, FALSE))
             env = NULL; /* fall back to inherited environment */
         ok = CreateProcessAsUserA(ptok, NULL, (LPSTR)cmdline,
-                                  NULL, NULL, FALSE, flags,
-                                  env, NULL, &si, pi);
+                                  NULL, NULL, inherit, flags,
+                                  env, cwd, &si, pi);
     }
     if (env && pEnvFree) pEnvFree(env);
     if (tok)  CloseHandle(tok);
     if (ptok) CloseHandle(ptok);
 
     if (!ok)
-        ok = CreateProcessA(NULL, (LPSTR)cmdline, NULL, NULL, FALSE,
-                            flags, NULL, NULL, &si, pi);
+        ok = CreateProcessA(NULL, (LPSTR)cmdline, NULL, NULL, inherit,
+                            flags, NULL, cwd, &si, pi);
+    if (hout) CloseHandle(hout);   /* child holds its own copy */
     return ok ? 0 : (int)GetLastError();
 }
 
@@ -271,7 +302,7 @@ static int launch_app(const app_t *a)
     }
 
     memset(&pi, 0, sizeof(pi));
-    rc = spawn_app(cmdline, &pi);
+    rc = spawn_app(cmdline, a->cwd, a->output, &pi);
     if (rc != 0) {
         log_msg("launch: FAILED '%s' (cmd='%s') err=%d",
                 a->name, a->cmd, rc);
@@ -390,7 +421,7 @@ static int sup_launch(int i)
     }
 
     memset(&pi, 0, sizeof(pi));
-    rc = spawn_app(cmdline, &pi);
+    rc = spawn_app(cmdline, g_sapps[i].cwd, g_sapps[i].output, &pi);
     if (rc != 0) {
         log_msg("sup: start '%s' failed (cmd='%s') err=%d",
                 g_sapps[i].name, g_sapps[i].cmd, rc);

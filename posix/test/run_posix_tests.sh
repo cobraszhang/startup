@@ -301,6 +301,50 @@ pkill -x sleep 2>/dev/null
 rm -rf "$SD" "$SC_S" /tmp/posix-t11a.log /tmp/posix-t11b.log \
        /tmp/posix-t11-srv.log
 
+echo "== 12. per-app cwd and output capture =="
+WD="/tmp/bl-wd-$$"
+mkdir -p "$WD/sub" "$WD/a sub"
+cat > "$WD/co.conf" <<EOF
+[cwdq]
+cmd = /bin/sh -c "pwd; echo hello-q"
+cwd = "$WD/a sub"
+output = "$WD/outq.txt"
+
+[cwdp]
+cmd = /bin/sh -c "pwd; echo hello-p"
+cwd = $WD/sub
+output = $WD/outp.txt
+EOF
+./build/release/startup -c "$WD/co.conf" run >/dev/null 2>&1
+sleep 1
+ok=1
+if grep -q "hello-q" "$WD/outq.txt" 2>/dev/null \
+   && grep -qxF "$WD/a sub" "$WD/outq.txt" \
+   && grep -q "hello-p" "$WD/outp.txt" 2>/dev/null \
+   && grep -qxF "$WD/sub" "$WD/outp.txt"; then ok=0; fi
+report "run: cwd applied (quoted and bare), stdout+stderr captured to file" $ok
+
+RT="$WD/rt.conf"
+cp "$WD/co.conf" "$RT"
+./build/release/startup -c "$RT" set cwdp cwd "$WD/never" >/dev/null 2>&1
+./build/release/startup -c "$RT" set cwdp output "$WD/out2.txt" >/dev/null 2>&1
+./build/release/startup -c "$RT" list > "$WD/list.txt" 2>&1
+./build/release/startup -c "$RT" check >/dev/null 2>&1; rcc=$?
+ok=1
+if grep -qF "cwd  = $WD/never" "$WD/list.txt" \
+   && grep -qF "out  = $WD/out2.txt" "$WD/list.txt" \
+   && grep -qF "cwd = $WD/never" "$RT" \
+   && grep -qF "output = $WD/out2.txt" "$RT" \
+   && [ "$rcc" = 0 ]; then ok=0; fi
+report "cli set/list/save round-trip for cwd+output (config reloads)" $ok
+
+./build/release/startup -c "$RT" set cwdp cwd "" >/dev/null 2>&1
+./build/release/startup -c "$RT" list > "$WD/list2.txt" 2>&1
+ok=1
+if ! grep -qF "cwd  = $WD/never" "$WD/list2.txt"; then ok=0; fi
+report "cli set with empty value clears the field" $ok
+rm -rf "$WD"
+
 
 echo
 echo "========  $PASS passed, $FAIL failed  ========"
