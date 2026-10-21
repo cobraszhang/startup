@@ -183,12 +183,18 @@ int app_build_cmdline(const char *stored, char *out, size_t outsz)
  * systems may lack wtsapi32.dll. */
 typedef DWORD (WINAPI *wts_active_session_fn)(void);
 typedef BOOL (WINAPI *wts_query_user_token_fn)(DWORD, HANDLE *);
+typedef BOOL (WINAPI *create_environment_block_fn)(LPVOID *, HANDLE, BOOL);
+typedef BOOL (WINAPI *destroy_environment_block_fn)(LPVOID);
 
 static int spawn_app(const char *cmdline, PROCESS_INFORMATION *pi)
 {
     wts_active_session_fn     pActive = (wts_active_session_fn)0;
     wts_query_user_token_fn   pToken  = (wts_query_user_token_fn)0;
+    create_environment_block_fn  pEnvBlk = (create_environment_block_fn)0;
+    destroy_environment_block_fn pEnvFree = (destroy_environment_block_fn)0;
     static HMODULE            hWts    = NULL;
+    static HMODULE            hUe     = NULL;
+    LPVOID                    env     = NULL;
     HMODULE                   hK;
     DWORD                     session = 0xFFFFFFFF;
     HANDLE                    tok  = NULL, ptok = NULL;
@@ -217,14 +223,32 @@ static int spawn_app(const char *cmdline, PROCESS_INFORMATION *pi)
         pToken = c2.fn;
     }
 
+    if (!hUe) hUe = LoadLibraryA("userenv.dll");
+    if (hUe) {
+        union { FARPROC raw; create_environment_block_fn fn; } c3;
+        union { FARPROC raw; destroy_environment_block_fn fn; } c4;
+        c3.raw = GetProcAddress(hUe, "CreateEnvironmentBlock");
+        c4.raw = GetProcAddress(hUe, "DestroyEnvironmentBlock");
+        pEnvBlk  = c3.fn;
+        pEnvFree = c4.fn;
+    }
+
     if (pActive) session = pActive();
     if (pToken && session != 0xFFFFFFFF && pToken(session, &tok) &&
         DuplicateTokenEx(tok, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE |
                          TOKEN_QUERY, NULL, SecurityImpersonation,
-                         TokenPrimary, &ptok))
+                         TokenPrimary, &ptok)) {
+        /* the environment must be the one belonging to the user token:
+         * inheriting the service's LocalSystem block would put
+         * USERPROFILE/APPDATA under the systemprofile directory, which
+         * the user account cannot write (apps died at first startup) */
+        if (pEnvBlk && !pEnvBlk(&env, ptok, FALSE))
+            env = NULL; /* fall back to inherited environment */
         ok = CreateProcessAsUserA(ptok, NULL, (LPSTR)cmdline,
                                   NULL, NULL, FALSE, flags,
-                                  NULL, NULL, &si, pi);
+                                  env, NULL, &si, pi);
+    }
+    if (env && pEnvFree) pEnvFree(env);
     if (tok)  CloseHandle(tok);
     if (ptok) CloseHandle(ptok);
 

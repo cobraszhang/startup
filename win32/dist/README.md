@@ -359,7 +359,9 @@ POSIX 规则（有执行位的文件本就可直接运行，内核会认它的 s
 - 服务默认读取 **`<exe 目录>\..\conf\startup.conf`**（`-c` 可覆盖）。
 - 服务以 LocalSystem 运行（session 0），但启动应用时通过 `WTSGetActiveConsoleSessionId`
   + `WTSQueryUserToken` + `CreateProcessAsUserA` 落入**当前登录用户的桌面会话**——
-  控制台应用无窗口（`CREATE_NO_WINDOW`），GUI 应用正常出现在用户桌面；
+  应用的环境块用 `CreateEnvironmentBlock(用户令牌)` 构建（`USERPROFILE`/`APPDATA` 等
+  指向该用户；若沿用服务的 LocalSystem 环境块，依赖这些目录的应用会在启动瞬间死亡且
+  无任何输出）；控制台应用无窗口（`CREATE_NO_WINDOW`），GUI 应用正常出现在用户桌面；
   无活动用户会话时回退普通 `CreateProcess`（POSIX 侧 `serve` 不涉及）。
 - **服务日志自动写入 `<exe 目录>\..\logs\startup.log`**（启动时创建目录；设置环境变量
   `BOOTLAUNCHER_LOG=<路径>` 可改用任意文件）。日志同时仍输出到 stderr。
@@ -439,6 +441,18 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 
 ## 已通过的验证
 
+- **用户环境块**（真机根因修复）：实机上服务以用户令牌启动的应用“启动即退出、
+  重定向日志为空”——`CreateProcessAsUser` 传 `lpEnvironment=NULL` 时环境块继承的是
+  服务的 **LocalSystem** 环境，`USERPROFILE` 指向 `C:\Windows\System32\config\systemprofile`
+  而用户令牌对其无写权限。修复：`CreateEnvironmentBlock`（userenv.dll，动态加载）按
+  用户令牌生成环境块传入。部署用 `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)` 排队
+  （运行中的服务镜像无法原地覆盖）：下次开机 Session Manager 在服务启动前完成替换。
+- **DSH 网关的无头启动接口**（可直接写进 startup.conf 的条目形式）：安装包自带 dsh CLI
+  可纯 Node 模式运行——`"…\DeepSeek Harness.exe" --expose-internals
+  "…\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js" --profile web`
+  （即官方 `dsh --profile web`：常驻 Web/网关 surface，无窗口；`--port`/`--no-open` 可选；
+  认证 URL 打印到 stdout）。实测：独立端口下启动、无窗口常驻、带 token 的 URL 经
+  `cmd /c … > 日志 2>&1` 包装落盘、HTTP 401（未认证探测的正常应答）、停止干净。
 - **开机启动次序**：install 自动把服务设为“自动(延迟启动)”——SCM 完成全部普通自启动
   服务后才拉起本服务（属开机流程，先于任何用户登录；手动 start 不受影响）。实测
   install 后 `QueryServiceConfig2` 回读 `fDelayedAutostart=TRUE`，日志打印确认；
