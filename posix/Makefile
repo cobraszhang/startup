@@ -65,6 +65,9 @@ $(OBJDIR)/%.o: $(CORE)/%.c $(HDRS) | $(OBJDIR)
 $(OBJDIR)/posix_main.o: posix_main.c posix_app.h $(HDRS) | $(OBJDIR)
 	$(CC) $(ALL_CFLAGS) -I$(CORE) -c -o $@ $<
 
+$(OBJDIR)/ipc_posix.o: ipc_posix.c $(HDRS) | $(OBJDIR)
+	$(CC) $(ALL_CFLAGS) -I$(CORE) -c -o $@ $<
+
 $(OBJDIR)/gui_gtk.o: gui_gtk.c posix_app.h $(HDRS) | $(OBJDIR)
 	$(CC) $(ALL_CFLAGS) -I$(CORE) -c -o $@ $<
 

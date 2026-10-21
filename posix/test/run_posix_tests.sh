@@ -146,8 +146,20 @@ report "cli check (cycle detection + fix)" $ok
 rm -f "$ORDER_OUT"
 ./build/release/bootlauncher -c "$CLI_T" run >/tmp/posix-t6e.log 2>&1
 rc=$?
-sleep 1
+# poll until all four probes have written (loaded systems can delay them;
+# this removes write-completion from the equation, leaving only order)
+i=0
+while [ "$i" -lt 50 ]; do
+    [ "$(wc -l < "$ORDER_OUT" 2>/dev/null)" = "4" ] && break
+    i=$((i + 1)); sleep 0.1
+done
 if [ "$rc" = 0 ] && [ "$(cat "$ORDER_OUT" 2>/dev/null)" = "$(printf 'first\nsecond\nthird\nextra')" ]; then ok=0; else ok=1; fi
+if [ "$ok" = 1 ]; then
+    echo "  diag: order file content:"
+    sed 's/^/  | /' "$ORDER_OUT" 2>/dev/null
+    echo "  diag: run log:"
+    sed 's/^/  | /' /tmp/posix-t6e.log
+fi
 report "cli run applies edits (order first,second,third,extra)" $ok
 
 # 8f rm: entry and dangling references disappear

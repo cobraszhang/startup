@@ -18,7 +18,7 @@ set VCROOT=d:\my\run\Visual C++ 6.0\VC98
 set VSROOT=d:\my\run\Visual C++ 6.0
 set MINGW=d:\my\run\mingw64\bin
 
-set SHARED="%CORE%\cfg.c" "%CORE%\topo.c" "%CORE%\log.c" "%CORE%\cli.c" "%CORE%\ipc.c" "%CORE%\ipc_win32.c" "%SRC%\win32_service.c" "%SRC%\win32_gui.c"
+set SHARED="%CORE%\cfg.c" "%CORE%\topo.c" "%CORE%\log.c" "%CORE%\cli.c" "%CORE%\ipc.c" "%SRC%\ipc_win32.c" "%SRC%\win32_service.c" "%SRC%\win32_gui.c"
 set LIBS=-ladvapi32 -luser32 -lgdi32
 
 if not exist "%OUT%\debug"   mkdir "%OUT%\debug"

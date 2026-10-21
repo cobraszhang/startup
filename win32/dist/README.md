@@ -20,11 +20,10 @@ src/                仅放跨平台共享源文件（纯 C89）
   cli.[ch]            共享命令行管理接口（Win32 与 POSIX 同一个 cli_main）
   version.h           发布版本号单一来源（当前 0.1.1）
   ipc.[ch]            服务进程↔用户进程控制协议（共享语法与客户端调用）
-  ipc_win32.c         命名管道传输（服务侧 + CLI 客户端）
-  ipc_posix.c         AF_UNIX 套接字传输（含 FD_CLOEXEC，防 fd 泄入子应用）
 
 win32/              Win32 平台源文件与工程文件
-  win32_service.c     服务/CLI 入口（SCM 注册、CreateProcess 启动）
+  win32_service.c     服务/CLI 入口（SCM 注册、CreateProcess 启动、supervisor 常驻）
+  ipc_win32.c         控制接口命名管道传输（服务侧 + CLI 客户端）
   win32_gui.c         结构化 GUI 配置/状态窗口（原生 API，GBK 源码）
   win32_app.h         服务与 GUI 共用的内部接口
   build_win32.cmd     MinGW-w64 与 VC6 双编译器构建脚本（debug/release 四份）
@@ -37,7 +36,8 @@ win32/              Win32 平台源文件与工程文件
   dist\bin\           发布执行文件（入库）
 
 posix/              *nix 平台源文件与工程文件
-  posix_main.c        开机/CLI 入口（fork + /bin/sh -c，可 -d 后台化）
+  posix_main.c        开机/supervisor/CLI 入口（fork + /bin/sh -c，可 -d 后台化）
+  ipc_posix.c         控制接口 AF_UNIX 套接字传输（含 FD_CLOEXEC，防 fd 泄入子应用）
   gui_gtk.c           GTK+3 图形配置窗口（有桌面会话时无参数自动打开）
   posix_app.h         入口与 GUI 共用的内部接口
   Makefile            构建（自动探测 pkg-config gtk+-3.0，有则编入 GUI）
