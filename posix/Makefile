@@ -41,7 +41,8 @@ ALL_CFLAGS = $(CFLAGS) $(MODEFLAGS) $(DEFS) $(GTK_CFLAGS)
 OBJS = $(OBJDIR)/cfg.o $(OBJDIR)/topo.o $(OBJDIR)/log.o \
        $(OBJDIR)/cli.o $(OBJDIR)/posix_main.o $(GUI_OBJS)
 
-HDRS = $(CORE)/cfg.h $(CORE)/topo.h $(CORE)/log.h $(CORE)/cli.h
+HDRS = $(CORE)/cfg.h $(CORE)/topo.h $(CORE)/log.h $(CORE)/cli.h \
+       $(CORE)/version.h
 
 all: release debug
 

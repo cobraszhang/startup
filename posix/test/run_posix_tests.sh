@@ -160,6 +160,13 @@ report "cli rm (drops entry and references)" $ok
 ./build/release/bootlauncher -c "$CLI_T" dep add extra ghost >/dev/null 2>&1; rcb=$?
 if [ "$rca" != 0 ] && [ "$rcb" != 0 ]; then ok=0; else ok=1; fi
 report "cli error exit codes" $ok
+
+# 8h version: subcommand and -V report the same release version
+vout=$(./build/release/bootlauncher version 2>&1); rca=$?
+vout2=$(./build/release/bootlauncher -V 2>&1); rcb=$?
+if [ "$rca" = 0 ] && [ "$rcb" = 0 ] && [ "$vout" = "$vout2" ] \
+   && echo "$vout" | grep -q '^AppBootLauncher [0-9]*\.[0-9]*\.[0-9]*$'; then ok=0; else ok=1; fi
+report "cli version / -V consistency" $ok
 rm -f "$CLI_T"
 
 echo "== 9. GTK GUI self-test (needs gtk+-3.0 dev + a display) =="

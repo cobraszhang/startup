@@ -27,6 +27,7 @@
 #include "topo.h"
 #include "log.h"
 #include "cli.h"
+#include "version.h"
 #include "win32_app.h"
 
 #define CONF_SUBPATH   "..\\conf\\startup.conf"
@@ -222,7 +223,8 @@ static void WINAPI service_main(DWORD argc, char **argv)
 
     GetModuleFileNameA(NULL, exe, MAX_PATH);
     default_conf_path(exe, conf, sizeof(conf));
-    log_msg("service: configuration file: %s", conf);
+    log_msg("service: AppBootLauncher " APPBOOT_VERSION
+            ", configuration file: %s", conf);
 
     report_status(SERVICE_RUNNING, 0);
     run_all(conf);
@@ -374,6 +376,8 @@ int main(int argc, char **argv)
     if (strcmp(pos[0], "start") == 0)     return svc_control("start", 0);
     if (strcmp(pos[0], "stop") == 0)      return svc_control("stop", 0);
     if (strcmp(pos[0], "console") == 0)   pos[0] = (char *)"run";
+    if (strcmp(pos[0], "-V") == 0 || strcmp(pos[0], "--version") == 0)
+        pos[0] = (char *)"version";
 
     if (cli_is_known(pos[0]))
         return cli_main(npos, pos, argv[0] ? argv[0] : "startup",

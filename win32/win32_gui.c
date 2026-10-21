@@ -22,6 +22,7 @@
 #include "topo.h"
 #include "log.h"
 #include "win32_app.h"
+#include "version.h"
 
 #define ID_APPLIST   100
 #define ID_DEPSLIST  101
@@ -557,11 +558,15 @@ int gui_main(const char *confpath)
     wc.lpszClassName = "AppBootLauncherGui";
     if (!RegisterClassA(&wc)) return 1;
 
-    hwnd = CreateWindowExA(0, wc.lpszClassName,
-        "开机启动应用管理器 - AppBootLauncher",
+    {
+        char ttl[256];
+        sprintf(ttl, "开机启动应用管理器 - AppBootLauncher v%s",
+                APPBOOT_VERSION);
+        hwnd = CreateWindowExA(0, wc.lpszClassName, ttl,
         WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 900, 640,
-        NULL, NULL, wc.hInstance, NULL);
+            NULL, NULL, wc.hInstance, NULL);
+    }
     if (!hwnd) return 1;
 
     ShowWindow(hwnd, SW_SHOW);

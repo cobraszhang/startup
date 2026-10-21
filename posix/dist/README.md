@@ -17,12 +17,14 @@ src/                仅放跨平台共享源文件（纯 C89）
   topo.[ch]           Kahn 拓扑排序 + 环检测 / 未知依赖检测
   log.[ch]            带时间戳的日志（可重定向到 GUI）
   cli.[ch]            共享命令行管理接口（Win32 与 POSIX 同一个 cli_main）
+  version.h           发布版本号单一来源（当前 0.1.1）
 
 win32/              Win32 平台源文件与工程文件
   win32_service.c     服务/CLI 入口（SCM 注册、CreateProcess 启动）
   win32_gui.c         结构化 GUI 配置/状态窗口（原生 API，GBK 源码）
   win32_app.h         服务与 GUI 共用的内部接口
-  build_win32.cmd     MinGW-w64 与 VC6 双编译器构建脚本
+  build_win32.cmd     MinGW-w64 与 VC6 双编译器构建脚本（debug/release 四份）
+  appboot.rc          Windows 文件版本资源（VERSIONINFO，需与 version.h 同步）
   package_win32.cmd   生成发布包到 dist\
   conf\startup.conf   Windows 样例配置（也是开发构建的默认 ../conf 目标）
   test\               Win32 测试配置与 svc_lifecycle.cmd
@@ -42,6 +44,18 @@ posix/              *nix 平台源文件与工程文件
   build/release/      发布构建（-O2，make install/package 取这里，不入库）
   dist\bin\           发布执行文件（入库）
 ```
+
+## 版本
+
+当前发布版本：**v0.1.1**（git 标签 `v0.1.1`）。
+
+版本号的单一来源是 `src/version.h`（`APPBOOT_VERSION`），CLI 的 `version` 子命令、
+`-V`、usage 头行、两版 GUI 窗口标题和服务日志都从这里取。发版时同步三处：
+
+1. 修改 `src/version.h`；
+2. 修改 `win32/appboot.rc` 里的 `FILEVERSION/PRODUCTVERSION/String`（Windows
+   文件版本属性，构建时嵌入四个 exe）；
+3. `git tag v<版本号>`。
 
 ## 发布包布局
 
@@ -120,6 +134,7 @@ set <name> wait <ms>     修改启动后等待
 dep add <a> <b>          让 a 依赖 b（b 必须已存在）
 dep del <a> <b>          删除该依赖
 help                     子命令帮助
+version                  打印发布版本号（POSIX 还有等价的 -V 选项）
 ```
 
 > `gui`（仅 POSIX 且构建时带 GTK）：强制打开图形配置窗口，不在共享 `cli.c` 子命令表内。
@@ -270,19 +285,22 @@ Win32 服务完整生命周期：以管理员运行 `win32\test\svc_lifecycle.cm
   自截图确认窗口完整渲染（中文标签、列表、表单、依赖多选预选、状态框载入 3 应用）；
   脚本化自检（载入 + 依赖预选 + 拓扑校验）通过；`APPBOOT_GUI_SHOT` cairo 自截图在 Wayland
   后端可用（服务端像素回读不可用，故不用截屏工具）。
-- `wsl -u root` 下 `posix/test/run_posix_tests.sh` **17/17 通过**（新增第 9 项 GTK GUI 自检；
+- `wsl -u root` 下 `posix/test/run_posix_tests.sh` **18/18 通过**（新增 GTK GUI 自检与版本一致性用例；
   开机类用例显式 `env -u DISPLAY -u WAYLAND_DISPLAY` 以覆盖“无桌面=开机模式”语义）。
 - 目录整理（共享 src/，win32/、posix/ 各带源文件+工程文件，产物在 <平台>/build，发布在 <平台>/dist/bin）后全量重验：
   - `win32\build_win32.cmd` 双编译器 × debug/release 四份产物零警告（debug 含 .pdb），产出到 `win32\build\{debug,release}\`；
-  - `win32\build\release\startup-gcc.exe order` 不带 `-c` 正确解析 `win32\build\..\conf\startup.conf`（即 `win32\conf\`），两个 exe 一致；
-  - `wsl -u root` 下 `cd posix && sh test/run_posix_tests.sh` **17/17 通过**（debug/release 双配置 Makefile、新测试路径，含 GTK GUI 自检）；
+  - `win32\build\release\startup-gcc.exe order` 不带 `-c` 通过两级回退正确解析 `win32\conf\startup.conf`，两个 exe 一致；
+  - `wsl -u root` 下 `cd posix && sh test/run_posix_tests.sh` **18/18 通过**（debug/release 双配置、版本子命令、含 GTK GUI 自检）；
   - GUI 无参数启动正确读取新位置样例配置（截图确认）；
   - 发布包重新生成：`win32\dist\bin\*.exe`、`posix/dist/bin/bootlauncher`（含 `dist/conf`）。
 - 双编译器（MinGW-w64 gcc 16.2 / MSVC 6.0 SP6）构建 Win32 版，零警告。
 - gcc `-std=c89 -pedantic` 构建 POSIX 版，零警告。
 - 乱序配置 → 实际按 first→second→third 启动（落盘证实），两个 exe 均通过（`win32/test/order.conf`、`posix/test/order.conf`）。
 - 环检测（`cycle.conf`）与未知依赖（`baddep.conf`）：报错并列出问题应用，退出码非 0（两平台）。
-- POSIX 测试套件 17 项：**release+debug 双构建零警告**、**debug 版可运行且 order 正确**、前台顺序、环、未知依赖、`-d` 守护模式、`make install`（装到 `/usr/local/conf`）、systemd unit（`systemctl start` 后按序落盘）、**exe 相对 `../conf` 默认路径解析**、**CLI 管理接口 7 项**（list、order、add/set/dep/rename 往返、check 环检测与修复、run 应用编辑后的配置真实按新序启动、rm 清除引用、错误退出码）、**GTK GUI 自检**（模型载入、依赖预选计数、拓扑校验输出）。
+- 版本 v0.1.1 实测：四个 Win32 exe 文件属性 `FileVersion=0.1.1`（windres 走 `-O coff` 链入 gcc，
+  rc.exe 的 `.res` 经 `/link` 交给 VC6 link.exe）；两平台 `version` 子命令与 POSIX `-V` 输出一致；
+  Win32 GUI 标题实测为 `开机启动应用管理器 - AppBootLauncher v0.1.1`，GTK 标题同样带版本。
+- POSIX 测试套件 18 项：**version 子命令与 -V 输出一致**、**release+debug 双构建零警告**、**debug 版可运行且 order 正确**、前台顺序、环、未知依赖、`-d` 守护模式、`make install`（装到 `/usr/local/conf`）、systemd unit（`systemctl start` 后按序落盘）、**exe 相对 `../conf` 默认路径解析**、**CLI 管理接口 7 项**（list、order、add/set/dep/rename 往返、check 环检测与修复、run 应用编辑后的配置真实按新序启动、rm 清除引用、错误退出码）、**GTK GUI 自检**（模型载入、依赖预选计数、拓扑校验输出）。
 - Win32 CLI 实测（两个 exe）：完整序列 `list/order/check/add/set/dep/rename` 正确；rename 后其他应用依赖引用跟随；人为制造环 → `check` 报错 rc=1，`dep del` 后恢复 OK；未知命令 rc=2 并打印完整用法。
 - SysV 脚本 `/etc/init.d/bootlauncher start` 按序启动验证通过。
 - 发布包布局实测：`dist\bin\*.exe` 从无关 cwd 启动，均正确读取同包 `conf/startup.conf` 并按序启动。

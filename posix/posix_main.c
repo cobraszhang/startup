@@ -35,15 +35,18 @@
 #include "topo.h"
 #include "log.h"
 #include "cli.h"
+#include "version.h"
 #include "posix_app.h"
 
 static void usage(const char *prog)
 {
+    fprintf(stderr, "AppBootLauncher %s\n", APPBOOT_VERSION);
     fprintf(stderr,
-        "usage: %s [-c config-file] [-d] [subcommand ...]\n"
+        "usage: %s [-c config-file] [-d] [-V] [subcommand ...]\n"
         "  default config: <exe dir>/../conf/startup.conf\n"
         "  -c FILE  configuration file (overrides the default)\n"
         "  -d       detach into the background (boot mode only)\n"
+        "  -V       print version and exit\n"
         "  (no subcommand) opens the configuration GUI when a graphical\n"
         "  session is detected; otherwise boots the applications\n",
         prog);
@@ -199,10 +202,13 @@ int main(int argc, char **argv)
     char exedir[4096];
     char chosen[4608];
 
-    while ((opt = getopt(argc, argv, "c:dh")) != -1) {
+    while ((opt = getopt(argc, argv, "c:dhV")) != -1) {
         switch (opt) {
         case 'c': conf = optarg; break;
         case 'd': daemon_mode = 1; break;
+        case 'V':
+            printf("AppBootLauncher %s\n", APPBOOT_VERSION);
+            return 0;
         default:  usage(argv[0]); return 2;
         }
     }
@@ -269,6 +275,7 @@ int main(int argc, char **argv)
 
     if (daemon_mode) daemonize();
 
-    log_msg("posix launcher: configuration file: %s", chosen);
+    log_msg("posix launcher " APPBOOT_VERSION ": configuration file: %s",
+            chosen);
     return run_all(chosen) == 0 ? 0 : 1;
 }

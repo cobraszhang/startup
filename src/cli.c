@@ -12,10 +12,11 @@
 #include "cfg.h"
 #include "topo.h"
 #include "log.h"
+#include "version.h"
 
 static const char *g_cmds[] = {
     "list", "order", "check", "run",
-    "add", "rm", "rename", "set", "dep", "help"
+    "add", "rm", "rename", "set", "dep", "help", "version"
 };
 
 int cli_is_known(const char *cmd)
@@ -28,6 +29,7 @@ int cli_is_known(const char *cmd)
 
 void cli_usage(const char *prog)
 {
+    fprintf(stderr, "AppBootLauncher %s\n", APPBOOT_VERSION);
     fprintf(stderr,
         "management subcommands (operate on the configuration file):\n"
         "  list                     list applications\n"
@@ -42,7 +44,8 @@ void cli_usage(const char *prog)
         "  set <name> wait <ms>     set post-start wait in ms\n"
         "  dep add <a> <b>          make application a depend on b\n"
         "  dep del <a> <b>          remove that dependency\n"
-        "  help                     this text\n");
+        "  help                     this text\n"
+        "  version                  print the release version\n");
     fprintf(stderr, "example: %s list   (config selected with -c FILE)\n",
             prog);
 }
@@ -105,6 +108,10 @@ int cli_main(int argc, char **argv, const char *prog,
 
     if (strcmp(cmd, "help") == 0) {
         cli_usage(prog);
+        return 0;
+    }
+    if (strcmp(cmd, "version") == 0) {
+        printf("AppBootLauncher %s\n", APPBOOT_VERSION);
         return 0;
     }
     if (strcmp(cmd, "run") == 0)
