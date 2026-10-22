@@ -475,6 +475,40 @@ report "set type + list/save round-trip (u1 system: same two-phase order)" $ok
 ok=1
 if grep -v '^#' "$CD/rt.conf" | grep -q 'type = '; then ok=1; else ok=0; fi
 report "empty type value clears the key from the config" $ok
+
+# ---- 14. install/uninstall: registration is analysed, never duplicated ----
+# user-side half is fully hermetic (XDG_CONFIG_HOME redirected into the
+# test dir); the system half may or may not need sudo - not asserted.
+echo "== 14. install/uninstall autostart registration (idempotent) =="
+AC="$CD/ac"
+AD="$AC/autostart"
+ADSK="$AD/startup-user.desktop"
+rm -rf "$AC"
+XDG_CONFIG_HOME="$AC" ./build/release/startup -c "$CD/rt.conf" install \
+    >"$CD/inst1.log" 2>&1
+ok=1
+if [ -f "$ADSK" ] && grep -q 'Exec=' "$ADSK" \
+   && grep -q -- '-d user' "$ADSK" \
+   && grep -q 'user autostart registered' "$CD/inst1.log"; then ok=0; fi
+report "install creates the user autostart entry" $ok
+cp "$ADSK" "$CD/ac.copy" 2>/dev/null
+XDG_CONFIG_HOME="$AC" ./build/release/startup -c "$CD/rt.conf" install \
+    >"$CD/inst2.log" 2>&1
+ok=1
+if grep -q 'already present, left unchanged' "$CD/inst2.log" \
+   && cmp -s "$ADSK" "$CD/ac.copy"; then ok=0; fi
+report "second install detects the entry and leaves it unchanged" $ok
+XDG_CONFIG_HOME="$AC" ./build/release/startup -c "$CD/rt.conf" uninstall \
+    >"$CD/uninst1.log" 2>&1
+ok=1
+if [ ! -f "$ADSK" ] \
+   && grep -q 'user autostart entry removed' "$CD/uninst1.log"; then ok=0; fi
+report "uninstall removes the user autostart entry" $ok
+XDG_CONFIG_HOME="$AC" ./build/release/startup -c "$CD/rt.conf" uninstall \
+    >"$CD/uninst2.log" 2>&1
+ok=1
+if grep -q 'no user autostart entry' "$CD/uninst2.log"; then ok=0; fi
+report "uninstall without an entry is a clean no-op" $ok
 rm -rf "$CD"
 
 echo

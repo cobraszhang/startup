@@ -10,7 +10,7 @@
 | 版本 | 入口 | 开机自启方式 |
 |---|---|---|
 | Win32 | `win32/win32_service.c`（服务/CLI 入口）+ `win32/win32_gui.c`（无参数时的配置/状态窗口）+ 共享 `src/cli.c` | 系统类：**Windows 系统服务**（自动启动，登录前的开机阶段拉起；v0.2.1 起，旧安装的“延迟自启”会在服务启动时自动纠正）；用户类：**当前用户 Run 注册项**（`install` 一并写入；登录时拉起 `user` supervisor） |
-| POSIX | `posix/posix_main.c`（开机/supervisor/CLI 入口）+ 共享 `src/cli.c` | 系统类：systemd unit（`serve`）/ SysV / rc.local；用户类：XDG autostart / 会话脚本（`user`，见 contrib/startup-user.*） |
+| POSIX | `posix/posix_main.c`（开机/supervisor/CLI 入口）+ 共享 `src/cli.c` | 系统类：`install` 自动生成 systemd unit（有 systemd 时）或 rc.local 行；用户类：`install` 写入 XDG autostart 条目（手工方式见 contrib/startup-user.*） |
 
 ## 目录结构
 
@@ -21,7 +21,7 @@ src/                仅放跨平台共享源文件（纯 C89）
   topo.[ch]           Kahn 拓扑排序 + 环检测 / 未知依赖检测（按 system/application 类别两阶段）
   log.[ch]            带时间戳的日志（可重定向到 GUI）
   cli.[ch]            共享命令行管理接口（Win32 与 POSIX 同一个 cli_main）
-  version.h           发布版本号单一来源（当前 0.2.1）
+  version.h           发布版本号单一来源（当前 0.2.2）
   ipc.[ch]            服务进程↔用户进程控制协议（共享语法与客户端调用）
 
 win32/              Win32 平台源文件与工程文件
@@ -54,7 +54,7 @@ posix/              *nix 平台源文件与工程文件
 
 ## 版本
 
-当前发布版本：**v0.2.1**（git 标签 `v0.2.1`）。
+当前发布版本：**v0.2.2**（git 标签 `v0.2.2`）。
 
 版本号的单一来源是 `src/version.h`（`APPBOOT_VERSION`），CLI 的 `version` 子命令、
 `-V`、usage 头行、两版 GUI 窗口标题和服务日志都从这里取。发版时同步三处：
@@ -141,7 +141,7 @@ deps = appserver                      ; 用户类依赖系统类：跨类别，�
 | 类别 | 配置 | 由谁启动（Win32） | 由谁启动（POSIX） | 控制端点 |
 |---|---|---|---|---|
 | 系统类 | 缺省或 `type = system` | Windows 服务 `AppBootLauncher`（`install`，自动启动：登录前的开机阶段拉起） | systemd `startup.service`（`serve`）/ SysV | `\\.\pipe\AppBootLauncher` / `/tmp/bootlauncher.ctl` |
-| 用户类 | `type = application` | 当前用户 Run 注册项（`install` 一并写入；单独 `install-user` 写 `AppBootLauncherUser` → `"exe" user`） | XDG autostart（contrib/startup-user.desktop）或会话脚本（contrib/startup-user.sh），执行 `startup -d user` | `\\.\pipe\AppBootLauncherUser` / `/tmp/bootlauncher-user.ctl` |
+| 用户类 | `type = application` | 当前用户 Run 注册项（`install` 一并写入；单独 `install-user` 写 `AppBootLauncherUser` → `"exe" user`） | 当前用户 XDG autostart 条目 `~/.config/autostart/startup-user.desktop`（`install` 写入，已存在则不动；手工模板 contrib/startup-user.*） | `\\.\pipe\AppBootLauncherUser` / `/tmp/bootlauncher-user.ctl` |
 
 顺序保证（`user` 入口在启动任何用户类应用之前）：
 
@@ -176,9 +176,15 @@ CLI 的 `app` 子命令自动跨两端：`list/status/shutdown` 不带名字时*
   提权）**并写当前用户登录时的 Run 项**（Run 值由本进程写自己的 HKCU，不会因提权写进
   别的用户配置单元）；`uninstall` 两者都删除。只想单独管理 Run 项时用
   `install-user` / `uninstall-user`（无需管理员）。GUI 的“安装服务/卸载服务”按钮同样成对处理。
-- POSIX：系统类仍是 unit 文件方式（contrib/startup.service）；用户类把
-  contrib/startup-user.desktop 复制到 `~/.config/autostart/`（改 Exec 路径）或在会话
-  脚本里 `startup -d user &`。
+- POSIX：`startup install` 同样一次完成两侧——**先分析、只补缺失**：
+  用户类条目 = 当前用户的 XDG autostart 桌面文件（`~/.config/autostart/startup-user.desktop`，
+  已存在则原样保留不动）；系统类 = systemd 在跑时生成 `/etc/systemd/system/startup.service`
+  （ExecStart 指向本程序绝对路径 `-d serve`，自动 enable），没有 systemd 时追加
+  `/etc/rc.local` 一行（已含 `-d serve` 则不动）；`/etc` 需要 root——非 root 会自动做一次
+  `sudo -n` 重试（无免密 sudo 时给出 `sudo <程序> install-system` 手动指引）。
+  `uninstall` 成对删除（unit 会先 disable 再删、rc.local 只剥离相应行）；
+  `install-system` / `uninstall-system` 单独管理系统侧。手工方式（contrib/ 下的 unit 与
+  autostart 模板、会话脚本）仍然可用，效果等同。
 
 ## 命令行管理接口（CLI，两版通用）
 
@@ -485,6 +491,24 @@ APPBOOT_GUI_SHOT=/tmp/gui.png ./build/release/startup -c cfg.conf
 
 ## POSIX 开机自启
 
+推荐直接用内置注册命令（与 Win32 的 `install/uninstall` 语义对等，**先分析已安装与否，
+只添加缺失的部分**）：
+
+```sh
+/usr/local/bin/startup install      # autostart 条目(当前用户) + systemd unit 或 rc.local(需 root)
+/usr/local/bin/startup uninstall    # 成对删除
+```
+
+- 用户侧写入 `~/.config/autostart/startup-user.desktop`（`Exec="<程序绝对路径>" -d user`）；
+  文件已存在时不覆盖不改（包括你自己定制过的版本），日志会说明“already present”。
+- 系统侧：检测到 systemd（`/run/systemd/system`）时生成并 enable
+  `/etc/systemd/system/startup.service`（`ExecStart=<绝对路径> -d serve`、
+  `Restart=on-failure`）；无 systemd（WSL 默认、容器）时改 `/etc/rc.local`（存在含
+  `-d serve` 的行即视为已注册）。需要 root；非 root 自动 `sudo -n` 重试一次，失败则
+  给出 `sudo <程序> install-system` 指引（`install-system/uninstall-system` 单独管理这侧）。
+
+手工方式仍然可用（效果等同，适合需要自定义 unit 的场景）：
+
 - systemd：`cp posix/contrib/startup.service /etc/systemd/system/ && systemctl enable startup`
   （unit 用 `Type=simple` + `ExecStart=/usr/local/bin/startup serve`：服务进程常驻
   并提供控制接口；`KillMode=mixed` 保证 `systemctl stop` 只终止 supervisor，
@@ -497,7 +521,7 @@ APPBOOT_GUI_SHOT=/tmp/gui.png ./build/release/startup -c cfg.conf
 
 ### POSIX 用户类（登录侧）
 
-系统类装好 systemd unit 后，把用户类挂到桌面会话：
+`install` 已自动注册用户侧；也可以手工把用户类挂到桌面会话：
 
 ```sh
 mkdir -p ~/.config/autostart
@@ -518,13 +542,16 @@ cd posix && sh test/run_posix_tests.sh
 #   wsl -u root bash -c "cd /mnt/d/My/DEV/startup/posix && sh test/run_posix_tests.sh"
 ```
 
-30 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
+34 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
 自定义端点的 `serve`，走 `app ping/status/stop/restart/unknown/shutdown` 全序列，
 并验证服务退出后 `app` 命令 rc=3；第 11 节验证脚本解释器自动解析（shebang 直启、
 无执行位补 `/bin/sh`、`.py` 补 python3、未知扩展名拒绝启动）；第 13 节验证启动类别：
 非法 `type` 值报错、`order` 两阶段（系统类全部在前）、系统类依赖用户类被拒绝、
 `user` 入口等待系统端点、两侧 supervisor 各自只列/只控本类别、跨类控制给出明确
-ERR、`set type` 往返与空值清除。
+ERR、`set type` 往返与空值清除；第 14 节验证注册命令的幂等分析：`install` 首次创建
+  用户 autostart 条目（`XDG_CONFIG_HOME` 重定向到测试目录，完全封闭）、第二次检测到
+  “already present” 且文件逐字节不变、`uninstall` 删除条目、再次 `uninstall` 是无副作用
+  的 no-op（系统侧依赖 root/环境，不作断言）。
 
 Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop` 控制接口验证，
 以及“卸载后服务必须从 SCM 彻底消失（`sc query` 返回 1060）”断言）：
@@ -535,6 +562,13 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 
 ## 已通过的验证
 
+- **v0.2.2 POSIX `install/uninstall`**：与 Win32 对等的双侧注册（先分析、只补缺失）——
+  用户侧 XDG autostart 桌面文件（存在即保留，含自定义过的）、系统侧 systemd unit
+  （检测 `/run/systemd/system`；生成 + `systemctl enable`）或无 systemd 时 `/etc/rc.local`
+  行（含 `-d serve` 即视为已注册）；非 root 自动 `sudo -n` 单次重试，失败给出手动指引。
+  `uninstall` 成对删除（unit 先 disable 再删，rc.local 仅剥离相应行重写文件）。
+  测试套件新增第 14 节 4 项断言（封闭在临时 XDG 目录），全量 **34/34 通过**；
+  确认测试未在 WSL 留下系统侧副作用（无 unit、无 rc.local 行）。
 - **用户侧控制台窗口问题**（真机反馈：开机加载的 DSH 带一个不能关的控制台窗口，双击
   启动则没有）：根因是用户侧 supervisor 启动子进程时沿用了服务侧的 `CREATE_NO_WINDOW`
   ——它给每个子进程一个**隐藏的新控制台**，Node/Electron 宿主检测到控制台会把窗口

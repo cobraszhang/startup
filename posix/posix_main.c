@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/types.h>
@@ -71,6 +72,14 @@ static void usage(const char *prog)
         "            waits until the system side finished, then starts\n"
         "            only application-class entries (run this from the\n"
         "            desktop session autostart, with -d or '&')\n");
+    fprintf(stderr,
+        "  install    register BOTH sides, adding only what is missing:\n"
+        "             this user's autostart entry (XDG autostart desktop\n"
+        "             file) and the system side (systemd unit when systemd\n"
+        "             runs, else /etc/rc.local; via sudo -n if not root)\n"
+        "  uninstall  remove both registrations again\n"
+        "  install-system / uninstall-system\n"
+        "             manage the system-side registration alone (root)\n");
     cli_usage(prog);
     fprintf(stderr, "  gui                      force opening the GUI\n");
 }
@@ -609,6 +618,314 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
     return op;
 }
 
+/* ------------------------------------------------------------------ */
+/* install / uninstall: register BOTH startup sides (POSIX counterpart  */
+/* of the Win32 service + Run-value model). The user side is this      */
+/* user's XDG autostart desktop file; the system side is a systemd     */
+/* unit when systemd runs, else an /etc/rc.local line (WSL without    */
+/* systemd, container, plain init). Anything already registered is     */
+/* detected and left alone - install never duplicates, the entry names */
+/* are fixed (startup.service / startup-user.desktop).                 */
+/* ------------------------------------------------------------------ */
+
+#define UNIT_NAME    "startup.service"
+#define UNIT_PATH    "/etc/systemd/system/startup.service"
+#define RCLOCAL_PATH "/etc/rc.local"
+#define SERVE_MARK   "-d serve"
+
+static int is_dir(const char *p)
+{
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int file_exists(const char *p)
+{
+    return access(p, F_OK) == 0;
+}
+
+static int file_contains(const char *path, const char *needle)
+{
+    FILE *f = fopen(path, "r");
+    char  line[2048];
+    int   found = 0;
+
+    if (!f) return 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, needle)) { found = 1; break; }
+    }
+    fclose(f);
+    return found;
+}
+
+static void exe_absolute(const char *argv0, char *out, size_t outsz)
+{
+    if (realpath(argv0, out)) return;
+    strncpy(out, argv0, outsz - 1);
+    out[outsz - 1] = '\0';
+}
+
+/* <XDG_CONFIG_HOME or HOME/.config>/autostart/startup-user.desktop */
+static int autostart_file(char *out, size_t outsz)
+{
+    const char *xdg  = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+
+    out[0] = '\0';
+    if (xdg && *xdg) {
+        strncpy(out, xdg, outsz - 1);
+    } else if (home && *home) {
+        strncpy(out, home, outsz - 1);
+        strncat(out, "/.config", outsz - strlen(out) - 1);
+    } else {
+        return -1;
+    }
+    out[outsz - 1] = '\0';
+    if (strlen(out) + 40 >= outsz) return -1;
+    strcat(out, "/autostart/startup-user.desktop");
+    return 0;
+}
+
+static void mkdir_ignoring_exists(const char *path)
+{
+    if (mkdir(path, 0755) != 0 && errno != EEXIST) {
+        log_msg("install: cannot create directory %s", path);
+    }
+}
+
+static int install_user_autostart(const char *exeabs)
+{
+    char  file[4096];
+    char  dir[4096];
+    char *slash;
+    FILE *f;
+
+    if (autostart_file(file, sizeof(file)) != 0) {
+        log_msg("install: cannot determine the autostart location "
+                "(set XDG_CONFIG_HOME or HOME)");
+        return 1;
+    }
+    if (file_exists(file)) {
+        log_msg("install: user autostart entry already present, left "
+                "unchanged: %s", file);
+        return 0;
+    }
+    strcpy(dir, file);
+    slash = strrchr(dir, '/');
+    if (!slash) return 1;
+    *slash = '\0';                      /* .../autostart */
+    {
+        char *slash2 = strrchr(dir, '/');
+        if (!slash2) return 1;
+        *slash2 = '\0';                 /* .../.config */
+        mkdir_ignoring_exists(dir);
+        *slash2 = '/';
+    }
+    mkdir_ignoring_exists(dir);
+    f = fopen(file, "w");
+    if (!f) {
+        log_msg("install: cannot write %s", file);
+        return 1;
+    }
+    fprintf(f,
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=startup user supervisor\n"
+        "Comment=start application-class entries at logon\n"
+        "Exec=\"%s\" -d user\n"
+        "Terminal=false\n"
+        "X-GNOME-Autostart-enabled=true\n",
+        exeabs);
+    fclose(f);
+    chmod(file, 0755);
+    log_msg("install: user autostart registered: %s -> \"%s\" -d user",
+            file, exeabs);
+    return 0;
+}
+
+static int uninstall_user_autostart(void)
+{
+    char file[4096];
+
+    if (autostart_file(file, sizeof(file)) != 0) {
+        log_msg("uninstall: cannot determine the autostart location");
+        return 1;
+    }
+    if (!file_exists(file)) {
+        log_msg("uninstall: no user autostart entry at %s", file);
+        return 0;
+    }
+    if (unlink(file) != 0) {
+        log_msg("uninstall: could not remove %s", file);
+        return 1;
+    }
+    log_msg("uninstall: user autostart entry removed: %s", file);
+    return 0;
+}
+
+static int install_system(const char *exeabs, const char *conffile)
+{
+    FILE *f;
+
+    if (is_dir("/run/systemd/system")) {
+        if (file_exists(UNIT_PATH)) {
+            log_msg("install: systemd unit already installed, left "
+                    "alone: %s", UNIT_PATH);
+            return 0;
+        }
+        if (geteuid() != 0) {
+            log_msg("install: installing the systemd unit needs root");
+            return 1;
+        }
+        f = fopen(UNIT_PATH, "w");
+        if (!f) {
+            log_msg("install: cannot write %s", UNIT_PATH);
+            return 1;
+        }
+        fprintf(f,
+            "[Unit]\n"
+            "Description=startup boot-time launcher (system side)\n"
+            "After=network.target\n\n"
+            "[Service]\n"
+            "ExecStart=\"%s\" -d serve\n"
+            "Restart=on-failure\n\n"
+            "[Install]\n"
+            "WantedBy=multi-user.target\n", exeabs);
+        fclose(f);
+        if (system("systemctl daemon-reload >/dev/null 2>&1") != 0)
+            log_msg("install: WARNING systemctl daemon-reload failed");
+        if (system("systemctl enable " UNIT_NAME " >/dev/null 2>&1") != 0)
+            log_msg("install: WARNING systemctl enable failed");
+        log_msg("install: systemd unit installed and enabled: %s",
+                UNIT_PATH);
+        return 0;
+    }
+
+    /* no systemd running: /etc/rc.local fallback */
+    if (file_contains(RCLOCAL_PATH, SERVE_MARK)) {
+        log_msg("install: " RCLOCAL_PATH " already runs the system-side "
+                "supervisor, left unchanged");
+        return 0;
+    }
+    if (geteuid() != 0) {
+        log_msg("install: registering the system side in " RCLOCAL_PATH
+                " needs root");
+        return 1;
+    }
+    {
+        int fresh = !file_exists(RCLOCAL_PATH);
+        f = fopen(RCLOCAL_PATH, fresh ? "w" : "a");
+        if (!f) {
+            log_msg("install: cannot write " RCLOCAL_PATH);
+            return 1;
+        }
+        if (fresh) {
+            fprintf(f, "#!/bin/sh -e\n");    /* created: make it valid */
+        } else {
+            fputc('\n', f);                  /* append on its own line */
+        }
+        fprintf(f, "\"%s\" -d serve -c \"%s\"\n", exeabs, conffile);
+        fclose(f);
+    }
+    chmod(RCLOCAL_PATH, 0755);
+    log_msg("install: appended the system-side command to " RCLOCAL_PATH);
+    return 0;
+}
+
+/* rewrite a file without the lines matching `drop` */
+static int file_strip_lines(const char *path, const char *drop)
+{
+    char  tmp[4096];
+    FILE *in, *out;
+    char  line[2048];
+    int   changed = 0;
+
+    strcpy(tmp, path);
+    strcat(tmp, ".startup-tmp");
+    in = fopen(path, "r");
+    if (!in) return -1;
+    out = fopen(tmp, "w");
+    if (!out) { fclose(in); return -1; }
+    while (fgets(line, sizeof(line), in)) {
+        if (strstr(line, drop)) { changed = 1; continue; }
+        fputs(line, out);
+    }
+    fclose(in);
+    fclose(out);
+    if (!changed) { unlink(tmp); return 0; }
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 1;
+}
+
+static int uninstall_system(void)
+{
+    int r;
+
+    if (is_dir("/run/systemd/system")) {
+        if (!file_exists(UNIT_PATH)) {
+            log_msg("uninstall: no systemd unit installed");
+            return 0;
+        }
+        if (geteuid() != 0) {
+            log_msg("uninstall: removing the systemd unit needs root");
+            return 1;
+        }
+        if (system("systemctl disable " UNIT_NAME " >/dev/null 2>&1") != 0)
+            log_msg("uninstall: WARNING systemctl disable failed");
+        if (unlink(UNIT_PATH) != 0) {
+            log_msg("uninstall: could not remove %s", UNIT_PATH);
+            return 1;
+        }
+        if (system("systemctl daemon-reload >/dev/null 2>&1") != 0)
+            log_msg("uninstall: WARNING systemctl daemon-reload failed");
+        log_msg("uninstall: systemd unit removed: %s", UNIT_PATH);
+        return 0;
+    }
+
+    if (!file_exists(RCLOCAL_PATH)) {
+        log_msg("uninstall: nothing to remove (no systemd, no rc.local)");
+        return 0;
+    }
+    if (!file_contains(RCLOCAL_PATH, SERVE_MARK)) {
+        log_msg("uninstall: no launcher line in " RCLOCAL_PATH);
+        return 0;
+    }
+    if (geteuid() != 0) {
+        log_msg("uninstall: editing " RCLOCAL_PATH " needs root");
+        return 1;
+    }
+    r = file_strip_lines(RCLOCAL_PATH, SERVE_MARK);
+    if (r < 0) {
+        log_msg("uninstall: could not rewrite " RCLOCAL_PATH);
+        return 1;
+    }
+    log_msg("uninstall: removed the system-side line from " RCLOCAL_PATH);
+    return 0;
+}
+
+/* one non-interactive sudo retry of the system-side half only; used by
+ * install/uninstall when /etc could not be written as the user */
+static int try_sudo(const char *sub, const char *conffile,
+                    const char *argv0)
+{
+    char  self[PATH_MAX];
+    char *args[7];
+
+    exe_absolute(argv0, self, sizeof(self));
+    args[0] = "sudo";
+    args[1] = "-n";                    /* never prompt: fail fast */
+    args[2] = self;
+    args[3] = "-c";
+    args[4] = (char *)conffile;
+    args[5] = (char *)sub;
+    args[6] = NULL;
+    execvp("sudo", args);
+    return 1;                          /* sudo not even installed */
+}
+
 /* User applications must never start before system services: wait
  * until the system-side supervisor's control endpoint exists - that
  * socket appears only once every system-class app has been launched.
@@ -762,6 +1079,45 @@ int main(int argc, char **argv)
             serve_loop();
             return 0;
         }
+        if (strcmp(sub[0], "install") == 0) {
+            /* both sides, analysed like the Win32 install: never touches
+             * an existing registration, adds what is missing */
+            char exeabs[PATH_MAX];
+            int  rc_u, rc_s;
+            exe_absolute(argv[0], exeabs, sizeof(exeabs));
+            rc_u = install_user_autostart(exeabs);
+            rc_s = install_system(exeabs, chosen);
+            if (rc_s != 0 && geteuid() != 0) {
+                log_msg("install: retrying the system side through "
+                        "'sudo -n' (needs passwordless sudo)");
+                try_sudo("install-system", chosen, argv[0]);
+                log_msg("install: could not run sudo; finish with: "
+                        "sudo %s install-system -c \"%s\"",
+                        exeabs, chosen);
+                rc_s = 1;
+            }
+            return (rc_u != 0 || rc_s != 0) ? 1 : 0;
+        }
+        if (strcmp(sub[0], "uninstall") == 0) {
+            int rc_u = uninstall_user_autostart();
+            int rc_s = uninstall_system();
+            if (rc_s != 0 && geteuid() != 0) {
+                log_msg("uninstall: retrying the system side through "
+                        "'sudo -n' (needs passwordless sudo)");
+                try_sudo("uninstall-system", chosen, argv[0]);
+                log_msg("uninstall: could not run sudo; finish with: "
+                        "sudo <program> uninstall-system");
+                rc_s = 1;
+            }
+            return (rc_u != 0 || rc_s != 0) ? 1 : 0;
+        }
+        if (strcmp(sub[0], "install-system") == 0) {
+            char exeabs[PATH_MAX];
+            exe_absolute(argv[0], exeabs, sizeof(exeabs));
+            return install_system(exeabs, chosen);
+        }
+        if (strcmp(sub[0], "uninstall-system") == 0)
+            return uninstall_system();
         if (!cli_is_known(sub[0])) {
             log_msg("unknown command '%s'", sub[0]);
             usage(argv[0]);
