@@ -164,8 +164,10 @@ CLI 的 `app` 子命令自动跨两端：`list/status/shutdown` 不带名字时*
 会隐藏自己的控制台窗口；`-c/-s` 选项对 `user` 同样有效（测试与自定义部署用）。
 日志与系统侧共用 `<安装目录>\logs\startup.log`（追加模式，多进程安全）。
 
-- Win32 注册：`startup-gcc.exe install`（系统类服务，UAC）与 `startup-gcc.exe install-user`
-  （当前用户 Run 项，无需管理员）互相独立；`uninstall` / `uninstall-user` 对应删除。
+- Win32 注册：`startup-gcc.exe install` 一次完成两侧——创建系统类服务（非管理员自动 UAC
+  提权）**并写当前用户登录时的 Run 项**（Run 值由本进程写自己的 HKCU，不会因提权写进
+  别的用户配置单元）；`uninstall` 两者都删除。只想单独管理 Run 项时用
+  `install-user` / `uninstall-user`（无需管理员）。GUI 的“安装服务/卸载服务”按钮同样成对处理。
 - POSIX：系统类仍是 unit 文件方式（contrib/startup.service）；用户类把
   contrib/startup-user.desktop 复制到 `~/.config/autostart/`（改 Exec 路径）或在会话
   脚本里 `startup -d user &`。
@@ -359,10 +361,10 @@ win32\build\release\startup-gcc.exe                  :: 无参数：打开 GUI �
 win32\build\release\startup-gcc.exe service          :: 服务入口（SCM 用；install 时自动写入 binPath）
 win32\build\release\startup-gcc.exe serve            :: 前台 supervisor（系统类；不注册服务，也有控制接口）
 win32\build\release\startup-gcc.exe user             :: 用户侧 supervisor（只启动 application 类；先等系统侧完成；隐藏自身控制台）
-win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动-延迟启动：所有自启动服务完成后、登录前拉起；非管理员自动 UAC 提权）
-win32\build\release\startup-gcc.exe install-user     :: 写当前用户 Run 项 AppBootLauncherUser -> "exe" user（登录即启动用户侧；无需管理员）
-win32\build\release\startup-gcc.exe uninstall-user   :: 删除该 Run 项
-win32\build\release\startup-gcc.exe start | stop | uninstall   :: uninstall 会先停服务并等待其停止再真正删除
+win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动-延迟启动：所有自启动服务完成后、登录前拉起；非管理员自动 UAC 提权），同时写当前用户的登录 Run 项拉起用户侧（application 类随之加载）
+win32\build\release\startup-gcc.exe install-user     :: 只写当前用户 Run 项 AppBootLauncherUser -> "exe" user（登录即启动用户侧；无需管理员）
+win32\build\release\startup-gcc.exe uninstall-user   :: 只删除该 Run 项
+win32\build\release\startup-gcc.exe start | stop | uninstall   :: uninstall 会先停服务并等待其停止再真正删除（并移除当前用户的 Run 项）
 win32\build\release\startup-gcc.exe run | console -c test\order.conf   :: 不装服务，直接在控制台调试
 win32\build\release\startup-gcc.exe help             :: 管理子命令列表（见上文“命令行管理接口”）
 ```

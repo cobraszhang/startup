@@ -996,6 +996,27 @@ static int svc_elevated(const char *what)
     return 1;
 }
 
+/* "install" covers both halves of the boot model: the system-side
+ * service AND this user's autostart entry for the user-side
+ * supervisor, so application-class entries actually start at logon.
+ * The Run value is written by this (unelevated) process - the
+ * interactive user's own HKCU - even when service creation itself
+ * goes through UAC. install-user / uninstall-user remain available to
+ * manage only one half. */
+int svc_install(void)
+{
+    int rc = svc_control("install", 1);
+    if (rc == 0) runreg_control("install-user");
+    return rc;
+}
+
+int svc_uninstall(void)
+{
+    int rc = svc_control("uninstall", 0);
+    if (rc == 0) runreg_control("uninstall-user");
+    return rc;
+}
+
 int svc_control(const char *what, int needs_create)
 {
     SC_HANDLE scm = NULL, svc = NULL;
@@ -1110,10 +1131,11 @@ static void usage(const char *prog)
         "  serve         foreground supervisor with the control IPC\n"
         "  user          user-side supervisor (application-class only;\n"
         "                starts after the system side; hides its console)\n"
-        "  install       create service '%s' with automatic start\n",
+        "  install       create service '%s' with automatic start AND\n"
+        "                this user's logon entry for 'user' (both sides)\n",
         prog, SERVICE_NAME);
     fprintf(stderr,
-        "  uninstall     remove the service\n"
+        "  uninstall     remove the service and this user's logon entry\n"
         "  install-user  add the current-user Run entry for 'user'\n"
         "  uninstall-user remove that entry\n"
         "  start | stop  control the installed service\n"
@@ -1209,8 +1231,8 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (strcmp(pos[0], "install") == 0)     return svc_control("install", 1);
-    if (strcmp(pos[0], "uninstall") == 0)   return svc_control("uninstall", 0);
+    if (strcmp(pos[0], "install") == 0)     return svc_install();
+    if (strcmp(pos[0], "uninstall") == 0)   return svc_uninstall();
     if (strcmp(pos[0], "install-user") == 0)   return runreg_control("install-user");
     if (strcmp(pos[0], "uninstall-user") == 0) return runreg_control("uninstall-user");
     if (strcmp(pos[0], "start") == 0)     return svc_control("start", 0);

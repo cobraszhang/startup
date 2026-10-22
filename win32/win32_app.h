@@ -25,6 +25,13 @@ int  app_build_cmdline(const char *stored, char *out, size_t outsz);
 /* install / uninstall / start / stop via the SCM; returns 0 on success */
 int  svc_control(const char *what, int needs_create);
 
+/* install/uninstall including the current user's autostart entry for
+ * the user-side supervisor (the Run value is written by the calling
+ * process, i.e. the interactive user's own HKCU, even when service
+ * creation goes through UAC); returns 0 on success */
+int  svc_install(void);
+int  svc_uninstall(void);
+
 /* open the configuration/status window (implemented in win32_gui.c) */
 int  gui_main(const char *confpath);
 

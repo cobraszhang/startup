@@ -757,8 +757,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         case ID_SAVE:    do_save();       break;
         case ID_CHECK:   check_or_run(0); break;
         case ID_RUNNOW:  check_or_run(1); break;
-        case ID_SVCI:    svc_control("install", 1);   refresh_service(); break;
-        case ID_SVCD:    svc_control("uninstall", 0); refresh_service(); break;
+        case ID_SVCI:    svc_install();               refresh_service(); break;
+        case ID_SVCD:    svc_uninstall();               refresh_service(); break;
         case ID_SVCS:    svc_control("start", 0);     refresh_service(); break;
         case ID_SVCT:    svc_control("stop", 0);      refresh_service(); break;
         case ID_REFRESH: refresh_service(); break;
