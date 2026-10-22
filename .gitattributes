@@ -14,6 +14,7 @@ Makefile text eol=lf
 *.dsw    text eol=crlf
 .gitattributes text eol=lf
 .gitignore     text eol=lf
+history.txt    text eol=lf
 
 # GBK(代码页936) 文件：按字节存储，禁止任何文本/行尾转换，否则中文会变乱码
 win32/win32_gui.c      binary

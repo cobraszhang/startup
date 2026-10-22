@@ -1,0 +1,156 @@
+history of "startup" - boot-time application launcher
+=====================================================
+
+all entries are grouped by release; versions are the git tags v0.x.y.
+dates are local. archived source snapshots for 0.1.1 .. 0.2.2 are the
+zip files next to this file (d:\my\dev\startup-<version>.zip).
+
+
+0.2.5 (2026-10-22)
+  - fix: the win32 configuration window kept showing the OLD name in
+    the application list after rename+save (only the model was
+    updated; the listbox repainted when the window reopened). the
+    list and the dependency candidate list are repainted right after
+    a successful rename now. the GTK window had the same flaw, fixed
+    the same way (affected row updated in place to avoid retriggering
+    selection callbacks mid-commit).
+  - fix: cfg_save wrote "deps = a, b," with a trailing comma since
+    0.1.0 (the parser tolerated it, so it never surfaced); saved
+    configs now use the canonical "deps = a, b" form.
+  - tests: new format assertion (no deps line may end with a comma);
+    full suite 42/42.
+
+
+0.2.4 (2026-10-22)
+  - saved configs always state the boot policy explicitly: cfg_save
+    now writes "load = <effective value>" for every entry (unset
+    means the default start), so a saved startup.conf explains per
+    entry what happens at boot. parsing unchanged: an absent key
+    still means start; deleting the line returns to the default.
+  - tests: suite asserts a saved config contains the explicit
+    "load = start"; 41/41.
+
+
+0.2.3 (2026-10-22)
+  - per-entry boot load policy, orthogonal to the startup class:
+      load = start   always start at boot (default; old configs
+                     behave exactly as before)
+      load = stop    never started at boot; stays available for
+                     manual "app start" / GUI use
+      load = auto    started at boot only when the persistent state
+                     log shows the entry was last running
+  - state log (new shared src/state.[ch]): event-driven, appended by
+    the supervisor - start -> "running", exit/stop -> "stopped". a
+    crash emits no event, so the last line still reads "running",
+    which is exactly the right answer for auto. lives next to the
+    runtime log (same directory as $BOOTLAUNCHER_LOG, else
+    <exe>/../logs/startup-state.log). entries never recorded do not
+    auto-start; one manual start opts them in.
+  - boot filtering implemented in both sup_boot paths (service /
+    serve / user) and the POSIX no-args boot; the "run" verb and
+    the GUI "start apps in order" are explicit user actions and
+    bypass the filter (they still record state).
+  - config/CLI/GUI everywhere: strict value validation, "set <name>
+    load" (empty value restores the default), "list" shows the
+    effective value, the win32 configuration window gains a boot-load
+    dropdown, and the GTK window finally gains the previously missing
+    cwd/output/type editors plus the new load combo.
+  - tests: suite section 15 (six assertions); caught a real parser
+    bug during development (state-line value offset), fixed. 40/40.
+
+
+0.2.2 (2026-10-22)
+  - POSIX install/uninstall: the counterpart of the win32 service +
+    Run registration, with idempotent analysis (check what exists,
+    add only what is missing, never duplicate).
+  - the user side picks the registration form that actually works in
+    the environment: systemd running -> a systemd USER unit
+    (~/.config/systemd/user/startup-user.service, enable +
+    "loginctl enable-linger" hint); otherwise a freedesktop
+    autostart entry (~/.config/autostart/startup-user.desktop).
+    required directories are created automatically.
+  - the system side: systemd -> generated /etc/systemd/system/
+    startup.service; otherwise a guarded line appended to
+    /etc/rc.local. needs root; without it the CLI retries once via
+    "sudo -n" and otherwise prints the exact manual command.
+  - separate install-system / uninstall-system subcommands; uninstall
+    removes both forms and is a clean no-op when nothing is
+    registered.
+  - tests: suite section 14 verifies create / already-present
+    (byte-identical) / remove / no-op for either form; 34/34.
+
+
+0.2.1 (2026-10-22)
+  - boot order fix: system-class applications must start before any
+    user logon. the user supervisor no longer orders itself by
+    AUTO_START at the service's expense; the user side waits for the
+    system endpoint only when the service is actually set to start
+    at boot (auto -> wait; manual/disabled/missing -> proceed
+    immediately; bound by BOOTLAUNCHER_WAITMAX).
+  - old installations are self-healed: ensuring the Run entry also
+    corrects the service start type to automatic.
+  - console window fix: application-class children launched by the
+    user supervisor are started without a console window, matching
+    double-click behavior (the earlier CREATE_NO_WINDOW path was not
+    taken when launching from the Run entry).
+  - the VC6 workspace/project files (win32/startup.dsp, startup.dsw)
+    are tracked in the repository.
+  - win32 install/uninstall now register BOTH startup sides at once
+    (service + current-user Run value).
+
+
+0.2.0 (2026-10-22)
+  - two startup classes via "type = system | application" (absent =
+    system, old configs unchanged): system entries are started by
+    the boot side (win32 service / systemd unit), application
+    entries by the logon side (HKCU Run value / POSIX autostart).
+    user programs can never start before system services; a system
+    entry depending on an application entry is a hard error.
+  - shared two-phase topological ordering (class partition first,
+    then deps inside each class); "user" entry point waits for the
+    system endpoint; per-class control endpoints; "app" requests
+    against the wrong side get a clear error.
+  - tests: suite section 13 (class value rejection, two-phase
+    order, system-depends-on-application rejection, user entry
+    endpoint wait, per-class visibility and cross-class errors).
+
+
+0.1.1 (2026-10-21)
+  - single-source version (src/version.h); "version" subcommand and
+    -V; VERSIONINFO resource in every win32 build; GUI window
+    titles carry the version.
+
+
+unreleased development batch (2026-10-21, between 0.1.1 and 0.2.0)
+  - new per-app fields cwd (working directory: chdir /
+    lpCurrentDirectory) and output (append stdout+stderr to a
+    file); apps are launched directly so the supervisor monitors
+    the real main process instead of a cmd wrapper.
+  - supervisor model with a control interface (IPC): the service /
+    "serve" process keeps child handles; unix-socket (POSIX) and
+    named-pipe (win32) protocol; CLI "app ping/list/status/start/
+    stop/restart/shutdown"; the systemd unit switched to
+    Type=simple + serve. platform transports moved out of src/
+    (ipc_win32.c -> win32/, ipc_posix.c -> posix/).
+  - the POSIX executable renamed to "startup"; the application name
+    in all version info unified to "startup" (CLI/version/usage,
+    PONG, GUI titles, VERSIONINFO, config header, unit/S99/contrib
+    scripts); the IPC endpoints and the Windows service name stay.
+  - win32: service uninstall really removes the service;
+    applications start in the user session; the configuration
+    window gained process control; install registers the service as
+    automatic (delayed start); user environment block passed to
+    token-launched apps; children get CREATE_NO_WINDOW instead of
+    DETACHED_PROCESS (no stray console windows; the VC6-era
+    constant is guarded).
+  - win32 + GTK: browse button for the command line; the config
+    stores only the quoted script path, and the interpreter is
+    resolved at execution time (cmd /c, powershell -File, shell
+    association; on POSIX: shebang/exec-bit run as stored, non-exec
+    .sh/.bash via /bin/sh, .py/.pl/.rb/.js/.lua via PATH-probed
+    runtimes, unknown types refused at selection and fail cleanly
+    at launch).
+  - build: VC6 link passes /MACHINE:X86 explicitly when linking the
+    version resource (silences LNK4068).
+  - docs: profile isolation, gateway-profile derivation,
+    cwd/workspace semantics.
