@@ -164,7 +164,12 @@ CLI 的 `app` 子命令自动跨两端：`list/status/shutdown` 不带名字时*
 
 用户类进程在用户自己的会话中直接启动（Win32 用户侧 supervisor 是普通用户进程，
 `CreateProcess` 直接继承用户环境；不再走服务的 WTS 令牌路径）。Win32 的 `user` 入口
-会隐藏自己的控制台窗口；`-c/-s` 选项对 `user` 同样有效（测试与自定义部署用）。
+启动后会**彻底脱离自有的控制台窗口**（FreeConsole，窗口随之销毁，不是仅隐藏），并且
+启动应用时**不附加任何控制台标志**——被启动的 GUI 程序（如 Electron/Node 系应用）
+得到的启动条件与**双击桌面图标完全一致**（没有控制台；这类程序若被强加控制台会自行
+把窗口显示出来，这就是此前“开机加载的 DSH 多出一个不能关的控制台窗口”的原因）。
+从终端手动启动 `user` 调试时则识别为共享控制台：保留终端输出，只隐藏窗口。
+`-c/-s` 选项对 `user` 同样有效（测试与自定义部署用）。
 日志与系统侧共用 `<安装目录>\logs\startup.log`（追加模式，多进程安全）。
 
 - Win32 注册：`startup-gcc.exe install` 一次完成两侧——创建系统类服务（非管理员自动 UAC
@@ -363,7 +368,7 @@ Makefile 会自动加 `-DHAVE_GUI` 编译 `gui_gtk.c` 并链接 GTK（其 includ
 win32\build\release\startup-gcc.exe                  :: 无参数：打开 GUI 配置/状态窗口
 win32\build\release\startup-gcc.exe service          :: 服务入口（SCM 用；install 时自动写入 binPath）
 win32\build\release\startup-gcc.exe serve            :: 前台 supervisor（系统类；不注册服务，也有控制接口）
-win32\build\release\startup-gcc.exe user             :: 用户侧 supervisor（只启动 application 类；先等系统侧完成；隐藏自身控制台）
+win32\build\release\startup-gcc.exe user             :: 用户侧 supervisor（只启动 application 类；先等系统侧完成；脱离自有控制台，子程序按双击语义启动）
 win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动启动：登录前的开机阶段拉起；非管理员自动 UAC 提权），同时写当前用户的登录 Run 项拉起用户侧（application 类随之加载）
 win32\build\release\startup-gcc.exe install-user     :: 只写当前用户 Run 项 AppBootLauncherUser -> "exe" user（登录即启动用户侧；无需管理员）
 win32\build\release\startup-gcc.exe uninstall-user   :: 只删除该 Run 项
@@ -530,6 +535,14 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 
 ## 已通过的验证
 
+- **用户侧控制台窗口问题**（真机反馈：开机加载的 DSH 带一个不能关的控制台窗口，双击
+  启动则没有）：根因是用户侧 supervisor 启动子进程时沿用了服务侧的 `CREATE_NO_WINDOW`
+  ——它给每个子进程一个**隐藏的新控制台**，Node/Electron 宿主检测到控制台会把窗口
+  重新显示出来（属主是应用，关掉即杀应用）。现在 `user` 入口启动时若控制台仅归属
+  自己则 `FreeConsole` 彻底脱离（由 Run 项拉起的情形；从终端启动调试时识别为共享
+  控制台，只隐藏不脱离），且应用侧 `CreateProcess` 不再带任何控制台标志。
+  真机用 GUI 子系统标记程序（PE subsystem=2，与 DSH 同类）实测：修复后子进程
+  `GetConsoleProcessList()==0`（完全无控制台，与双击一致）；服务侧路径不变。
 - **v0.2.1 启动次序修正**（真机反馈：开机后 application 先于 system 启动）：原因
   ① 服务装成“自动(延迟启动)”，登录前没起、登录后 1-3 分钟才起；② `wait_system_ready`
   对“已安装但 STOPPED”的服务直接放行——Run 项登录瞬间就把用户类拉了起来。修复：
@@ -675,7 +688,10 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 - 用户侧就绪判定：Win32 以“服务 RUNNING + 系统端 PONG”为准；服务是否值得等待由其
   **启动类型**决定（自动启动→未运行也等；手动/禁用/未安装→不阻塞），等待上限
   `BOOTLAUNCHER_WAITMAX`；POSIX 以“系统端套接字文件存在”为准（同上限，缺省 60）。
-- Win32 `user` 入口由 Run 项拉起时其控制台窗口会短暂出现再被隐藏（GetConsoleWindow +
-  ShowWindow），无闪窗控制（无托盘图标，进程常驻）。多用户快速切换时各用户登录各自
+- Win32 `user` 入口由 Run 项拉起时，其控制台窗口在启动瞬间会短暂出现（console 子系统
+  程序的固有行为，进程自身无法避免），随后被 `FreeConsole` 整体销毁，不会再有任何窗口。
+  用户类子进程按“双击语义”启动：GUI 程序无控制台；**控制台子系统的用户程序会各有一个
+  自己的可见控制台窗口**（与双击运行一致；不想要窗口的程序用 `output` 或自行隐藏）。
+  多用户快速切换时各用户登录各自
   触发自己的 Run 项，多个用户侧 supervisor 各自独立（端点同名会冲突，可在 Run 值里
   加 `-s` 区分）。

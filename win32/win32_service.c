@@ -208,6 +208,42 @@ static void hide_console(void)
     if (hwnd) ShowWindow(hwnd, SW_HIDE);
 }
 
+/* Hiding is not enough: the console still exists, every child we
+ * launch inherits it, and hosts that notice a console (Node/Electron
+ * apps such as DSH) re-show the window - users then close "a startup
+ * window" and kill the application with it. If the console belongs to
+ * this process alone (Explorer created it for our Run entry), detach
+ * from it completely: the window is gone for good, and children then
+ * start exactly like double-clicked programs (GUI apps get no console
+ * at all, console apps get their own). When we share an existing
+ * console (started from a terminal to debug), keep it and only hide:
+ * that window belongs to the session, not to us. VC6 headers predate
+ * GetConsoleProcessList (Win2000+), so it is loaded dynamically. */
+typedef DWORD (WINAPI *get_console_process_list_fn)(DWORD *, DWORD);
+
+static void detach_own_console(void)
+{
+    union { FARPROC raw; get_console_process_list_fn fn; } c;
+    HMODULE k = GetModuleHandleA("kernel32.dll");
+    DWORD   pids[2];
+    DWORD   n = 0;
+
+    if (k) {
+        c.raw = GetProcAddress(k, "GetConsoleProcessList");
+        if (c.fn) n = c.fn(pids, 2);
+    }
+    if (n == 1) {
+        FreeConsole();
+        log_msg("user: detached our own console (children will start "
+                "exactly like double-clicked programs)");
+    } else if (n > 1) {
+        log_msg("user: sharing a console with %lu other process(es); "
+                "hiding only, control output stays there",
+                (unsigned long)(n - 1));
+        hide_console();
+    }
+}
+
 /* User applications must never start before system services: wait
  * until the system-side service is RUNNING *and* its control interface
  * answers (that interface opens only after every system-class app has
@@ -399,9 +435,17 @@ static int spawn_app(const char *cmdline, const char *cwd,
          * user's own session with the user's own environment, so a
          * plain CreateProcess inherits both correctly - using the
          * active-console-session token instead could pick the wrong
-         * user under fast user switching */
+         * user under fast user switching.
+         * No CREATE_NO_WINDOW here (unlike the service side): the
+         * flag gives every child a hidden console of its own, and
+         * hosts that notice a console (Node/Electron apps such as
+         * DSH) re-show it - an extra window the user can close to
+         * kill the app. Without the flag, and with our own console
+         * detached at startup (detach_own_console), children behave
+         * exactly like double-clicked programs: GUI apps get no
+         * console at all, console apps get their own visible one. */
         ok = CreateProcessA(NULL, (LPSTR)cmdline, NULL, NULL, inherit,
-                            flags, NULL, cwd, &si, pi);
+                            CREATE_NEW_PROCESS_GROUP, NULL, cwd, &si, pi);
         if (hout) CloseHandle(hout);
         return ok ? 0 : (int)GetLastError();
     }
@@ -1180,7 +1224,7 @@ static void usage(const char *prog)
     fprintf(stderr,
         "  serve         foreground supervisor with the control IPC\n"
         "  user          user-side supervisor (application-class only;\n"
-        "                starts after the system side; hides its console)\n"
+        "                starts after the system side; no own console)\n"
         "  install       create service '%s' with automatic start AND\n"
         "                this user's logon entry for 'user' (both sides)\n",
         SERVICE_NAME);
@@ -1270,7 +1314,7 @@ int main(int argc, char **argv)
          * and only after the system side has finished starting its
          * own; run it from the HKCU Run entry (see install-user) */
         setup_service_logging(exe);
-        hide_console();
+        detach_own_console();
         log_msg("user: startup " APPBOOT_VERSION
                 ", configuration file: %s", conf);
         g_kind = KIND_APP;
