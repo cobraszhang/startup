@@ -53,12 +53,14 @@
 #define ID_F_CWD      216
 #define ID_F_OUT      217
 #define ID_F_TYPE     218
+#define ID_F_LOAD     219
 
 static HWND  g_list = NULL, g_depslb = NULL, g_stated = NULL;
 static HWND  g_nameed = NULL, g_cmded = NULL, g_waited = NULL;
 static HWND  g_proclv = NULL;
 static HWND  g_cwded = NULL, g_outed = NULL;
 static HWND  g_typecb = NULL;
+static HWND  g_loadcb = NULL;
 static HFONT g_font_fixed = NULL;
 static char  g_confpath[MAX_PATH * 2];
 
@@ -222,6 +224,7 @@ static void fill_form(int i)
         SetWindowTextA(g_cwded, "");
         SetWindowTextA(g_outed, "");
         SendMessageA(g_typecb, CB_SETCURSEL, 0, 0);
+        SendMessageA(g_loadcb, CB_SETCURSEL, 0, 0);
         return;
     }
     SetWindowTextA(g_nameed, g_apps[i].name);
@@ -232,6 +235,9 @@ static void fill_form(int i)
     SetWindowTextA(g_outed, g_apps[i].output ? g_apps[i].output : "");
     SendMessageA(g_typecb, CB_SETCURSEL,
                  app_kind(&g_apps[i]) == KIND_APP ? 1 : 0, 0);
+    SendMessageA(g_loadcb, CB_SETCURSEL,
+                 app_load(&g_apps[i]) == LOAD_STOP ? 1 :
+                 app_load(&g_apps[i]) == LOAD_AUTO ? 2 : 0, 0);
 
     /* dependency candidates: every other app */
     for (j = 0; j < g_n; j++) {
@@ -299,6 +305,14 @@ static void apply_form(void)
         if (want != cur || g_apps[i].type)
             cfg_set_field(&g_apps[i], "type",
                           want == 1 ? "application" : "system");
+    }
+    {
+        int want = (int)SendMessageA(g_loadcb, CB_GETCURSEL, 0, 0);
+        int cur  = app_load(&g_apps[i]);
+        if (want != cur || g_apps[i].load)
+            cfg_set_field(&g_apps[i], "load",
+                          want == 1 ? "stop" :
+                          want == 2 ? "auto" : "start");
     }
 
     /* dependencies from the multi-select listbox */
@@ -702,6 +716,17 @@ static void on_create(HWND h)
     mk_label(h, "依赖（多选：Ctrl/Shift 点击）：", 225, 246, 300, fui);
     g_depslb = mk_listbox(h, ID_DEPSLIST, 225, 264, 300, 100,
                           LBS_MULTIPLESEL, fui);
+    mk_label(h, "开机加载（auto＝开机时查状态日志上次运行状态）：", 540, 246, 330, fui);
+    g_loadcb = CreateWindowExA(0, "COMBOBOX", "",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        540, 264, 200, 140, h, (HMENU)(LONG_PTR)ID_F_LOAD,
+        GetModuleHandleA(NULL), NULL);
+    if (g_loadcb) {
+        SendMessageA(g_loadcb, WM_SETFONT, (WPARAM)fui, TRUE);
+        SendMessageA(g_loadcb, CB_ADDSTRING, 0, (LPARAM)"开机启动 (start)");
+        SendMessageA(g_loadcb, CB_ADDSTRING, 0, (LPARAM)"开机不启动 (stop)");
+        SendMessageA(g_loadcb, CB_ADDSTRING, 0, (LPARAM)"按上次运行状态 (auto)");
+    }
 
     /* actions */
     mk_button(h, "保存配置",     ID_SAVE,    10,  378, 90,  fui);

@@ -209,7 +209,12 @@ void cli_usage(const char *prog)
         "  set <name> cwd <dir>     set working directory ('' clears)\n"
         "  set <name> output <f>    capture stdout+stderr ('' clears)\n"
         "  set <name> type <t>      system | application (startup class)\n"
+        "  set <name> load <l>      start | stop | auto (boot behaviour;\n"
+        "                           auto = only when the state log shows\n"
+        "                           the entry was last running)\n");
+    fprintf(stderr,
         "  dep add <a> <b>          make application a depend on b\n"
+        "  dep del <a> <b>          remove that dependency\n"
         "  dep del <a> <b>          remove that dependency\n"
         "  help                     this text\n"
         "  version                  print the release version\n");
@@ -303,6 +308,9 @@ int cli_main(int argc, char **argv, const char *prog,
             printf("  type = %s\n",
                    app_kind(&apps[i]) == KIND_APP ? "application"
                                                  : "system");
+            printf("  load = %s\n",
+                   app_load(&apps[i]) == LOAD_STOP ? "stop" :
+                   app_load(&apps[i]) == LOAD_AUTO ? "auto" : "start");
             if (apps[i].cwd)
                 printf("  cwd  = %s\n", apps[i].cwd);
             if (apps[i].output)
@@ -361,7 +369,7 @@ int cli_main(int argc, char **argv, const char *prog,
             rc = 2;
             fprintf(stderr,
                 "usage: set <name> cmd <line...> | set <name>"
-                " wait|cwd|output|type <value>\n");
+                " wait|cwd|output|type|load <value>\n");
         } else if ((idx = find_or_error(apps, n, argv[1])) < 0) {
             rc = 1;
         } else if (strcmp(argv[2], "cmd") == 0) {
@@ -377,8 +385,9 @@ int cli_main(int argc, char **argv, const char *prog,
                 free(full);
             }
         } else if (cfg_set_field(&apps[idx], argv[2], argv[3]) != 0) {
-            log_msg("cli: set: key must be cmd/wait/cwd/output/type with "
-                    "a valid value (type: system|application)");
+            log_msg("cli: set: key must be cmd/wait/cwd/output/type/"
+                    "load with a valid value (type: system|application, "
+                    "load: start|stop|auto)");
             rc = 1;
         } else rc = save_and_report(confpath, apps, n);
     } else if (strcmp(cmd, "dep") == 0) {

@@ -512,6 +512,82 @@ XDG_CONFIG_HOME="$AC" ./build/release/startup -c "$CD/rt.conf" uninstall \
 ok=1
 if grep -q 'no user-side registration' "$CD/uninst2.log"; then ok=0; fi
 report "uninstall without a registration is a clean no-op" $ok
+
+# ---- 15. load = start/stop/auto and the persistent state log ----
+echo "== 15. boot load behaviour + state log =="
+LD="$CD/ld"
+mkdir -p "$LD"
+OUT15="$LD/started.txt"
+ST15="$LD/startup-state.log"
+cat > "$LD/ld.conf" <<EOF
+[l1]
+cmd = sh -c 'echo l1 >> $OUT15; sleep 5'
+load = stop
+
+[l2]
+cmd = sh -c 'echo l2 >> $OUT15; sleep 5'
+load = auto
+
+[l3]
+cmd = sh -c 'echo l3 >> $OUT15'
+EOF
+
+boot15() {
+    rm -f "$OUT15"
+    BOOTLAUNCHER_LOG="$LD/run.log" ./build/release/startup -d \
+        -c "$LD/ld.conf" >/dev/null 2>&1
+    sleep 1
+}
+
+# a) load=stop and a never-recorded load=auto stay off at boot
+rm -f "$ST15"
+boot15
+ok=1
+if [ -f "$OUT15" ] && grep -q l3 "$OUT15" && ! grep -q l1 "$OUT15" \
+   && ! grep -q l2 "$OUT15"; then ok=0; fi
+report "load=stop and unrecorded load=auto do not start at boot" $ok
+
+# b) the started app IS recorded in the state log (running)
+ok=1
+if grep -q 'state=running name=l3' "$ST15"; then ok=0; fi
+report "started apps are recorded in the state log" $ok
+
+# c) auto with a running record starts; stop still never does
+printf '2020-01-01 00:00:00 state=running name=l2\n' >> "$ST15"
+boot15
+ok=1
+if grep -q l2 "$OUT15" && grep -q l3 "$OUT15" && ! grep -q l1 "$OUT15"; then ok=0; fi
+report "load=auto starts when the state log shows it running" $ok
+
+# d) auto with a stopped record stays off
+printf '2020-01-01 00:00:01 state=stopped name=l2\n' >> "$ST15"
+boot15
+ok=1
+if grep -q l3 "$OUT15" && ! grep -q l2 "$OUT15" \
+   && ! grep -q l1 "$OUT15"; then ok=0; fi
+report "load=auto stays off when the last state was stopped" $ok
+
+# e) config rejects an invalid load value
+cat > "$LD/bad.conf" <<EOF
+[x]
+cmd = true
+load = bogus
+EOF
+ok=1
+./build/release/startup -c "$LD/bad.conf" list >/dev/null 2>&1
+if [ $? -ne 0 ]; then ok=0; fi
+report "config rejects invalid load value" $ok
+
+# f) set load round-trips: new entry l4 -> auto in file and in list
+cp "$LD/ld.conf" "$LD/rt15.conf"
+./build/release/startup -c "$LD/rt15.conf" add l4 true >/dev/null 2>&1
+./build/release/startup -c "$LD/rt15.conf" set l4 load auto >/dev/null 2>&1
+ok=1
+if ./build/release/startup -c "$LD/rt15.conf" list \
+     | awk '/^l4$/{f=1;next} /^[^ ]/{f=0} f && /load = auto/{g=1}
+            END{exit !g}'; then ok=0; fi
+report "set load persists; list shows the effective value" $ok
+
 rm -rf "$CD"
 
 echo

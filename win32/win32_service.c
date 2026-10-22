@@ -30,6 +30,7 @@
 #include "../src/topo.h"
 #include "../src/log.h"
 #include "../src/cli.h"
+#include "../src/state.h"
 #include "../src/version.h"
 #include "../src/ipc.h"
 #include "win32_app.h"
@@ -524,6 +525,7 @@ static int launch_app(const app_t *a)
     }
     log_msg("launch: started '%s' pid=%lu",
             a->name, (unsigned long)pi.dwProcessId);
+    st_record(a->name, ST_RUNNING);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return 0;
@@ -647,6 +649,7 @@ static int sup_launch(int i)
     g_srt[i].state = 1;
     log_msg("sup: started '%s' pid=%lu",
             g_sapps[i].name, (unsigned long)pi.dwProcessId);
+    st_record(g_sapps[i].name, ST_RUNNING);
     return 0;
 }
 
@@ -667,6 +670,21 @@ static void sup_boot(void)
 
     for (i = 0; i < cnt; i++) {
         int idx = order[i];
+        int lm  = app_load(&g_sapps[idx]);
+        if (lm != LOAD_START) {
+            int go = (lm == LOAD_AUTO)
+                   ? (st_last(g_sapps[idx].name) == ST_RUNNING) : 0;
+            if (!go) {
+                log_msg("startup: NOT starting '%s' at boot (load=%s%s)",
+                        g_sapps[idx].name,
+                        lm == LOAD_STOP ? "stop" : "auto",
+                        lm == LOAD_STOP ? ""
+                                : ", last recorded state was not running");
+                continue;
+            }
+            log_msg("startup: starting '%s' at boot (load=auto, last "
+                    "recorded state was running)", g_sapps[idx].name);
+        }
         sup_launch(idx);
         if (g_sapps[idx].wait_ms > 0 && g_stop &&
             WaitForSingleObject(g_stop, (DWORD)g_sapps[idx].wait_ms)
@@ -689,6 +707,7 @@ static int rt_state(int i)
             if (g_srt[i].h) CloseHandle(g_srt[i].h);
             g_srt[i].h     = NULL;
             g_srt[i].state = 2;
+            st_record(g_sapps[i].name, ST_STOPPED);
         }
     }
     return g_srt[i].state;
@@ -766,6 +785,7 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
             CloseHandle(g_srt[idx].h);
             g_srt[idx].h     = NULL;
             g_srt[idx].state = 2;
+            st_record(g_sapps[idx].name, ST_STOPPED);
             log_msg("sup: stopped '%s' pid=%lu", g_sapps[idx].name,
                     (unsigned long)g_srt[idx].pid);
             rep(out, sz, "OK stopped '%s'\n", name);
@@ -778,6 +798,7 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
             CloseHandle(g_srt[idx].h);
             g_srt[idx].h     = NULL;
             g_srt[idx].state = 2;
+            st_record(g_sapps[idx].name, ST_STOPPED);
         }
         if (sup_launch(idx) != 0)
             rep(out, sz, "ERR restart failed for '%s'\n", name);
@@ -1272,6 +1293,19 @@ int main(int argc, char **argv)
     if (conf_arg) {
         strncpy(conf, conf_arg, sizeof(conf) - 1);
         conf[sizeof(conf) - 1] = '\0';
+    }
+
+    /* state log for load = start/stop/auto decisions: next to the
+     * runtime log when logging to a file, else dist\logs\ (service
+     * and user entries create that directory themselves) */
+    {
+        char exedir[MAX_PATH];
+        strcpy(exedir, exe);
+        {
+            char *s = strrchr(exedir, '\\');
+            if (s) *s = '\0';
+        }
+        st_init(getenv("BOOTLAUNCHER_LOG"), exedir);
     }
 
     if (npos == 0) {

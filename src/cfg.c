@@ -10,6 +10,9 @@
  *   cwd = <directory>      initial working directory (optional)
  *   output = <file>        child stdout+stderr appended to file (optional)
  *   type = system|application   startup class (optional, default system)
+ *   load = start|stop|auto      boot behaviour: always start / never /
+ *                              only when last runtime state was
+ *                              running (optional, default start)
  *
  * Portable C89 only: no strdup, no snprintf, declarations at block top.
  */
@@ -72,6 +75,13 @@ int app_kind(const app_t *a)
          ? KIND_APP : KIND_SYSTEM;
 }
 
+int app_load(const app_t *a)
+{
+    if (!a->load || strcmp(a->load, "start") == 0) return LOAD_START;
+    if (strcmp(a->load, "stop") == 0)              return LOAD_STOP;
+    return LOAD_AUTO;
+}
+
 void cfg_free(app_t *apps, int n)
 {
     int i, k;
@@ -83,6 +93,7 @@ void cfg_free(app_t *apps, int n)
         free(apps[i].cwd);
         free(apps[i].output);
         free(apps[i].type);
+        free(apps[i].load);
         free(apps[i].name);
     }
     free(apps);
@@ -233,6 +244,21 @@ int cfg_load(const char *path, app_t **apps_out, int *n_out)
             }
             cur->type = dup_str(val);
             if (!cur->type) goto fail;
+        } else if (strcmp(key, "load") == 0) {
+            if (cur->load) {
+                log_msg("cfg: %s:%d: duplicate load for app '%s'",
+                        path, ln, cur->name);
+                goto fail;
+            }
+            if (strcmp(val, "start") != 0 &&
+                strcmp(val, "stop") != 0 &&
+                strcmp(val, "auto") != 0) {
+                log_msg("cfg: %s:%d: load must be start, stop or "
+                        "auto (got '%s')", path, ln, val);
+                goto fail;
+            }
+            cur->load = dup_str(val);
+            if (!cur->load) goto fail;
         } else {
             log_msg("cfg: %s:%d: unknown key '%s'", path, ln, key);
             goto fail;
@@ -300,6 +326,7 @@ int cfg_remove(app_t **apps, int *n, const char *name)
     free((*apps)[i].cwd);
     free((*apps)[i].output);
     free((*apps)[i].type);
+    free((*apps)[i].load);
     free((*apps)[i].name);
     memmove(&(*apps)[i], &(*apps)[i + 1],
             (size_t)(*n - i - 1) * sizeof(app_t));
@@ -385,6 +412,18 @@ int cfg_set_field(app_t *a, const char *key, const char *val)
         }
         return 0;
     }
+    if (strcmp(key, "load") == 0) {
+        if (!*val) { free(a->load); a->load = NULL; return 0; }
+        if (strcmp(val, "start") != 0 && strcmp(val, "stop") != 0 &&
+            strcmp(val, "auto") != 0) return -1;
+        {
+            char *s = dup_str(val);
+            if (!s) return -1;
+            free(a->load);
+            a->load = s;
+        }
+        return 0;
+    }
     return -1;
 }
 
@@ -428,13 +467,16 @@ int cfg_save(const char *path, const app_t *apps, int n)
           "deps = comma separated prerequisites; wait = ms after start\r\n"
           "# optional per app: cwd = working directory; "
           "output = file for stdout+stderr; "
-          "type = system or application\r\n\r\n",
+          "type = system or application; "
+          "load = start, stop or auto\r\n\r\n",
           f);
     for (i = 0; i < n; i++) {
         fprintf(f, "[%s]\r\n", apps[i].name);
         fprintf(f, "cmd = %s\r\n", apps[i].cmd ? apps[i].cmd : "");
         if (apps[i].type)
             fprintf(f, "type = %s\r\n", apps[i].type);
+        if (apps[i].load)
+            fprintf(f, "load = %s\r\n", apps[i].load);
         if (apps[i].cwd)
             fprintf(f, "cwd = %s\r\n", apps[i].cwd);
         if (apps[i].output)

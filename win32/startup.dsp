@@ -104,6 +104,14 @@ SOURCE=..\src\cli.h
 # End Source File
 # Begin Source File
 
+SOURCE=..\src\state.c
+# End Source File
+# Begin Source File
+
+SOURCE=..\src\state.h
+# End Source File
+# Begin Source File
+
 SOURCE=..\src\ipc.c
 # End Source File
 # Begin Source File

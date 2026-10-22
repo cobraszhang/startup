@@ -11,6 +11,7 @@ typedef struct app {
     char  *cwd;      /* initial working directory, NULL = inherit      */
     char  *output;   /* file for child stdout+stderr, NULL = none      */
     char  *type;     /* "system"/"application", NULL = "system"        */
+    char  *load;     /* "start"/"stop"/"auto", NULL = "start"         */
 } app_t;
 
 /* startup class of one entry: KIND_SYSTEM entries are started by the
@@ -20,6 +21,15 @@ typedef struct app {
 #define KIND_SYSTEM 0
 #define KIND_APP    1
 int  app_kind(const app_t *a);  /* from a->type; default system */
+
+/* boot-time load behaviour (independent of the startup class):
+ * LOAD_START always start at boot; LOAD_STOP never start at boot;
+ * LOAD_AUTO start at boot only when the persistent state log shows
+ * the entry was last running (see src/state.h). */
+#define LOAD_START 0
+#define LOAD_STOP  1
+#define LOAD_AUTO  2
+int  app_load(const app_t *a);  /* from a->load; default start */
 
 /* Load configuration from file. Returns 0 on success and stores an
  * array of n apps in *apps_out; returns non-zero on any parse error. */
@@ -42,9 +52,9 @@ int  cfg_remove(app_t **apps, int *n, const char *name);
 /* Rename entry; other apps' dependency references follow. */
 int  cfg_rename(app_t *apps, int n, const char *oldname, const char *newname);
 
-/* Set "cmd", "wait", "cwd", "output" or "type" field of one app
- * (empty value clears cwd/output/type; type must be "system" or
- * "application"). */
+/* Set "cmd", "wait", "cwd", "output", "type" or "load" field of one
+ * app (empty value clears cwd/output/type/load; type must be "system"
+ * or "application"; load must be "start", "stop" or "auto"). */
 int  cfg_set_field(app_t *a, const char *key, const char *val);
 
 /* Add/remove a dependency; dep must name an existing app (add). */

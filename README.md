@@ -1,6 +1,8 @@
 # 开机自动加载应用启动器（boot-time application launcher）
 
 按配置文件中的 **依赖关系（deps）** 决定应用的启动顺序：先做拓扑排序，再按序启动。
+每个条目还有 **开机加载策略（`load = start | stop | auto`）**：总是启动 / 开机不启动 /
+按状态日志里上次运行状态决定（见“配置格式”）。
 启动分为 **两个类别**（`type = system | application`，见“两类启动：系统服务与用户程序”）：
 系统类由开机侧（Win32 服务 / systemd）启动，用户类由登录侧（Win32 用户启动注册项 /
 桌面 autostart 脚本）启动，**用户程序永不先于系统服务启动**。
@@ -21,7 +23,8 @@ src/                仅放跨平台共享源文件（纯 C89）
   topo.[ch]           Kahn 拓扑排序 + 环检测 / 未知依赖检测（按 system/application 类别两阶段）
   log.[ch]            带时间戳的日志（可重定向到 GUI）
   cli.[ch]            共享命令行管理接口（Win32 与 POSIX 同一个 cli_main）
-  version.h           发布版本号单一来源（当前 0.2.2）
+  state.[ch]          开机加载 load=auto 的状态日志（启动/退出事件追加记录，开机查询末态）
+  version.h           发布版本号单一来源（当前 0.2.3）
   ipc.[ch]            服务进程↔用户进程控制协议（共享语法与客户端调用）
 
 win32/              Win32 平台源文件与工程文件
@@ -54,7 +57,7 @@ posix/              *nix 平台源文件与工程文件
 
 ## 版本
 
-当前发布版本：**v0.2.2**（git 标签 `v0.2.2`）。
+当前发布版本：**v0.2.3**（git 标签 `v0.2.3`）。
 
 版本号的单一来源是 `src/version.h`（`APPBOOT_VERSION`），CLI 的 `version` 子命令、
 `-V`、usage 头行、两版 GUI 窗口标题和服务日志都从这里取。发版时同步三处：
@@ -119,6 +122,7 @@ output = D:\logs\appserver.log        ; 子进程 stdout+stderr 追加到文件�
 [traytool]
 cmd = C:\tools\tray.exe
 type = application                    ; 用户类：登录时由用户侧 supervisor 启动（可选，默认 system）
+load = auto                           ; 开机加载策略：start|stop|auto（可选，默认 start，见下）
 deps = appserver                      ; 用户类依赖系统类：跨类别，天然满足（系统类必然先启动）
 ```
 
@@ -131,6 +135,11 @@ deps = appserver                      ; 用户类依赖系统类：跨类别，�
 - `cwd` 设定应用的初始工作目录（留空 = 继承启动方）。很多程序把数据、日志、会话目录解析到工作目录上——POSIX 侧子进程先 `chdir`（失败则该应用不启动并报错），Win32 侧传给 `CreateProcess` 的 `lpCurrentDirectory`。
 - `output` 把子进程的 stdout+stderr **追加**写入该文件（POSIX 用 `dup2`，Win32 用 `STARTF_USESTDHANDLES`；文件打开失败仍照常启动，仅记一条日志）。有了它就不再需要 `cmd /c … > 日志` 这类包装——**包装会让 supervisor 监控到包装进程而非应用主进程**，状态与控制都会失真。
 - `type` 指定启动类别：`system`（缺省，不写即系统类）或 `application`。两个类别由**不同的启动方**拉起并各自常驻 supervisor（详见“两类启动”）：系统类由开机侧启动，用户类由登录侧启动；`type` 只接受这两个值，其他值报解析错误。旧配置（无 `type` 键）行为与之前完全一致（全部按系统类两阶段序启动）。
+- `load` 指定**开机加载策略**（与类别正交，两类别通用；`start`/`stop`/`auto`，缺省 `start`，旧配置行为不变）：
+  - `start`：开机（supervisor 引导）时总是启动；
+  - `stop`：开机时**不**启动——条目保留在配置里，随时可手动 `app start` 或 GUI 启动；
+  - `auto`：开机时查询**状态日志**中该条目的最后一次状态记录：上次处于运行 → 启动；上次已停止（或从未运行过）→ 不启动。
+  状态日志是 supervisor **事件驱动**追加的记录（`<日志目录>\startup-state.log`，与 `startup.log` 同目录；`BOOTLAUNCHER_LOG` 决定日志位置时状态日志随同）：应用启动成功写 `running`，应用退出或被停止写 `stopped`。**崩溃没有退出事件，末条仍是 running**——auto 语义正好正确（机器崩溃/断电前它在跑，开机就恢复它）。auto 的“从未运行过”不启动：新条目先手动启动一次，之后它就按上次状态自动跟随开机。`run` 子命令与 GUI 的“按序启动应用”是明确的手动动作，**不受 load 过滤**（但同样记入状态日志）。
 - 已启动的应用在停止/卸载服务时**不会被杀掉**（有意为之，应用生命周期归其自身管理）。
 
 ## 两类启动：系统服务与用户程序
@@ -197,7 +206,7 @@ CLI 的 `app` 子命令自动跨两端：`list/status/shutdown` 不带名字时*
 （GUI 的“保存配置”走同一函数，两边产出逐字节一致）。
 
 ```
-list                     列出所有应用（cmd/type/deps/wait/cwd/output；type 显示生效类别）
+list                     列出所有应用（cmd/type/load/deps/wait/cwd/output；type/load 显示生效值）
 order                    打印按依赖解析出的启动顺序（系统类全部在前，再用户类）
 check                    仅校验配置（解析 + 拓扑 + 类别规则）
 run                      校验后按序启动全部应用（同样两阶段）
@@ -209,6 +218,7 @@ set <name> wait <ms>     修改启动后等待
 set <name> cwd <path>    修改工作目录（传空字符串 = 清除）
 set <name> output <p>    修改输出捕获文件（传空字符串 = 清除）
 set <name> type <t>      system | application（传空字符串 = 恢复缺省系统类）
+set <name> load <l>      start | stop | auto（开机加载策略；传空字符串 = 恢复缺省 start）
 dep add <a> <b>          让 a 依赖 b（b 必须已存在；系统类依赖用户类会被排序拒绝）
 dep del <a> <b>          删除该依赖
 help                     子命令帮助
@@ -390,8 +400,9 @@ win32\build\release\startup-gcc.exe help             :: 管理子命令列表（
 GUI 窗口功能（结构化编辑每个参数）：
 
 - 左侧应用列表（新增/删除应用），右侧每个参数一个控件：
-  名称、**类别下拉（系统服务类/用户应用类）**、命令行（**带“浏览...”按钮**）、
-  启动后等待毫秒、**依赖多选列表**（Ctrl/Shift 多选）；
+  名称、**类别下拉（系统服务类/用户应用类）**、**开机加载下拉（start/stop/auto，
+  auto 项说明“开机时查状态日志上次运行状态”）**、命令行（**带“浏览...”按钮**）、
+  启动后等待毫秒、**工作目录**、**输出捕获文件**、**依赖多选列表**（Ctrl/Shift 多选）；
 - 改名会自动同步其他应用对它的依赖引用；删除应用会清除悬空引用；
 - 保存配置：按列表顺序重新生成规范格式的 `conf\startup.conf`（共享 `cfg_save()`，与 CLI 产出一致）；
 - 校验依赖顺序（打印拓扑序）、按序启动应用；
@@ -552,7 +563,7 @@ cd posix && sh test/run_posix_tests.sh
 #   wsl -u root bash -c "cd /mnt/d/My/DEV/startup/posix && sh test/run_posix_tests.sh"
 ```
 
-34 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
+40 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
 自定义端点的 `serve`，走 `app ping/status/stop/restart/unknown/shutdown` 全序列，
 并验证服务退出后 `app` 命令 rc=3；第 11 节验证脚本解释器自动解析（shebang 直启、
 无执行位补 `/bin/sh`、`.py` 补 python3、未知扩展名拒绝启动）；第 13 节验证启动类别：
@@ -561,7 +572,10 @@ cd posix && sh test/run_posix_tests.sh
 ERR、`set type` 往返与空值清除；第 14 节验证注册命令的幂等分析：`install` 首次创建
   用户 autostart 条目（`XDG_CONFIG_HOME` 重定向到测试目录，完全封闭）、第二次检测到
   “already present” 且文件逐字节不变、`uninstall` 删除条目、再次 `uninstall` 是无副作用
-  的 no-op（系统侧依赖 root/环境，不作断言）。
+  的 no-op（系统侧依赖 root/环境，不作断言）；第 15 节验证开机加载：`load = stop` 与无记录的
+   `load = auto` 在开机引导时不启动、已启动条目被追加记录为 running、状态日志标记
+   running 后 auto 条目启动、末态 stopped 后 auto 条目保持不启动、非法 `load` 值被
+   配置解析拒绝、`set load` 经 list 的 awk 块断言往返。
 
 Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop` 控制接口验证，
 以及“卸载后服务必须从 SCM 彻底消失（`sc query` 返回 1060）”断言）：
@@ -572,6 +586,18 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 
 ## 已通过的验证
 
+- **v0.2.3 开机加载策略（`load = start|stop|auto`）与状态日志**：共享 `src/state.[ch]`
+  事件驱动记录（启动成功 → running；退出/停止 → stopped；崩溃无事件、末条仍为 running，
+  auto 语义自然正确），状态日志随 `BOOTLAUNCHER_LOG` 同目录，否则
+  `../logs/startup-state.log`。开机过滤实现于两侧 `sup_boot` 与 POSIX 无参一次性引导
+  （`run`/GUI 手动启动不过滤但同样记录）。配置/CLI/GUI 三端同步：`load` 严格值校验、
+  `set <name> load` 空值恢复缺省、`list` 显示生效值、Win32 配置窗口新增“开机加载”下拉、
+  **GTK 窗口同时补齐 `cwd`/`output`/`type`/`load` 四个缺失字段**。
+  POSIX 套件新增第 15 节 6 项断言（含开发中修复的状态行解析偏移 bug：`" state="` 值起点
+  应为 +7 而非 +1——首版实现下所有 auto 判定恒“未运行”，正是该测试抓到它），全量
+  **40/40 通过**；修复前后 win32 四配置零警告。Win32 真机冒烟（disposable conf +
+  前台 serve 两轮引导）：stop 与无记录 auto 不启动、追加 running 记录后 auto 启动、
+  started 条目状态日志可见。
 - **v0.2.2 POSIX `install/uninstall`**：与 Win32 对等的双侧注册（先分析、只补缺失）——
   用户侧按环境选形态：systemd 在跑（检测 `/run/systemd/system`）时写
   `~/.config/systemd/user/startup-user.service` 并 `systemctl --user enable`（无需 root；
@@ -732,8 +758,11 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 - 控制接口单实例串行处理（同一时刻一个客户端）；模型只在服务进程启动时载入，
   改配置后需重启服务进程生效。
 - 仅 ANSI（A 系）Win32 API；路径含非 ASCII 时建议配置文件与程序目录使用 ASCII 路径。
-- POSIX 的 GTK 配置窗口暂不编辑 `cwd`/`output`/`type` 字段（打开含这些字段的配置再保存，
-  字段经共享模型原样保留，不丢失）；Win32 配置窗口与 CLI 均可编辑。
+- POSIX 的 GTK 配置窗口现已支持全部条目字段（`cwd`/`output`/`type`/`load`）编辑，与
+  Win32 配置窗口一致。
+- `load = auto` 依赖状态日志可写：若日志目录不可创建/不可写（如安装目录只读且未设
+  `BOOTLAUNCHER_LOG`），状态记录会静默失败，auto 条目将始终按“从未运行”处理（不
+  开机启动，仍可手动启动）；状态日志按末条记录判定，手工编辑该文件同样有效。
 - 用户侧就绪判定：Win32 以“服务 RUNNING + 系统端 PONG”为准；服务是否值得等待由其
   **启动类型**决定（自动启动→未运行也等；手动/禁用/未安装→不阻塞），等待上限
   `BOOTLAUNCHER_WAITMAX`；POSIX 以“系统端套接字文件存在”为准（同上限，缺省 60）。

@@ -37,6 +37,7 @@ static cli_run_fn  g_run_fn = NULL;
 
 static GtkWidget   *w_app_tree, *w_deps_tree;
 static GtkWidget   *e_name, *e_cmd, *sp_wait, *tv_status;
+static GtkWidget   *e_cwd, *e_output, *cb_type, *cb_load;
 static GtkWidget   *g_win;                 /* top-level (dialog parent) */
 static GtkListStore *store_apps, *store_deps;
 static GtkTextBuffer *status_buf;
@@ -152,12 +153,24 @@ static void fill_form(int i)
     if (i < 0) {
         gtk_entry_set_text(GTK_ENTRY(e_name), "");
         gtk_entry_set_text(GTK_ENTRY(e_cmd), "");
+        gtk_entry_set_text(GTK_ENTRY(e_cwd), "");
+        gtk_entry_set_text(GTK_ENTRY(e_output), "");
+        gtk_combo_box_set_active(GTK_COMBO_BOX(cb_type), 0);
+        gtk_combo_box_set_active(GTK_COMBO_BOX(cb_load), 0);
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(sp_wait), 0);
         g_updating = 0;
         return;
     }
     gtk_entry_set_text(GTK_ENTRY(e_name), g_apps[i].name);
     gtk_entry_set_text(GTK_ENTRY(e_cmd), g_apps[i].cmd ? g_apps[i].cmd : "");
+    gtk_entry_set_text(GTK_ENTRY(e_cwd), g_apps[i].cwd ? g_apps[i].cwd : "");
+    gtk_entry_set_text(GTK_ENTRY(e_output),
+                       g_apps[i].output ? g_apps[i].output : "");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(cb_type),
+                             app_kind(&g_apps[i]) == KIND_APP ? 1 : 0);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(cb_load),
+                             app_load(&g_apps[i]) == LOAD_STOP ? 1 :
+                             app_load(&g_apps[i]) == LOAD_AUTO ? 2 : 0);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(sp_wait),
                               (double)g_apps[i].wait_ms);
 
@@ -230,6 +243,18 @@ static void apply_form(void)
     g_apps[i].wait_ms = (int)gtk_spin_button_get_value(
                             GTK_SPIN_BUTTON(sp_wait));
     if (g_apps[i].wait_ms < 0) g_apps[i].wait_ms = 0;
+
+    cfg_set_field(&g_apps[i], "cwd",
+                  gtk_entry_get_text(GTK_ENTRY(e_cwd)));
+    cfg_set_field(&g_apps[i], "output",
+                  gtk_entry_get_text(GTK_ENTRY(e_output)));
+    {
+        int at = gtk_combo_box_get_active(GTK_COMBO_BOX(cb_type));
+        cfg_set_field(&g_apps[i], "type", at == 1 ? "application" : "");
+        at = gtk_combo_box_get_active(GTK_COMBO_BOX(cb_load));
+        cfg_set_field(&g_apps[i], "load",
+                      at == 1 ? "stop" : at == 2 ? "auto" : "");
+    }
 
     /* dependencies from the multi-select tree */
     {
@@ -639,6 +664,39 @@ int gui_main(const char *confpath, cli_run_fn run_fn)
         gtk_label_new("依赖（按住 Ctrl/Shift 多选）："), 0, 2, 1, 1);
     sw = mk_scrolled_tree(&store_deps, TRUE, 320, 140, &w_deps_tree);
     gtk_grid_attach(GTK_GRID(grid), sw, 1, 3, 1, 1);
+
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("工作目录："),
+                    0, 4, 1, 1);
+    e_cwd = gtk_entry_new();
+    gtk_widget_set_hexpand(e_cwd, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), e_cwd, 1, 4, 3, 1);
+
+    gtk_grid_attach(GTK_GRID(grid),
+        gtk_label_new("输出捕获（stdout+stderr 追加文件）："), 0, 5, 1, 1);
+    e_output = gtk_entry_new();
+    gtk_grid_attach(GTK_GRID(grid), e_output, 1, 5, 3, 1);
+
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("启动类别："),
+                    0, 6, 1, 1);
+    cb_type = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(cb_type),
+                                   "system（系统侧）");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(cb_type),
+                                   "application（用户侧）");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(cb_type), 0);
+    gtk_grid_attach(GTK_GRID(grid), cb_type, 1, 6, 1, 1);
+
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("开机加载："),
+                    2, 6, 1, 1);
+    cb_load = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(cb_load),
+                                   "start（总是启动）");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(cb_load),
+                                   "stop（开机不启动）");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(cb_load),
+                                   "auto（上次处于运行才启动）");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(cb_load), 0);
+    gtk_grid_attach(GTK_GRID(grid), cb_load, 3, 6, 1, 1);
 
     /* action buttons */
     hbtn = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);

@@ -48,6 +48,7 @@
 #include "topo.h"
 #include "log.h"
 #include "cli.h"
+#include "state.h"
 #include "version.h"
 #include "ipc.h"
 #include "posix_app.h"
@@ -347,8 +348,15 @@ static int launch_app(const app_t *a)
         _exit(127);
     }
     log_msg("launch: started '%s' pid=%ld", a->name, (long)p);
+    st_record(a->name, ST_RUNNING);
     return 0;
 }
+
+/* non-zero on the no-subcommand boot path: run_all then honours the
+ * per-app load = start/stop/auto setting (the CLI 'run' verb and the
+ * GUI "start all" action are explicit user actions and start
+ * everything) */
+static int g_boot_mode = 0;
 
 int run_all(const char *confpath)
 {
@@ -370,6 +378,20 @@ int run_all(const char *confpath)
 
     for (i = 0; i < cnt; i++) {
         const app_t *a = &apps[order[i]];
+        if (g_boot_mode && app_load(a) != LOAD_START) {
+            int go = (app_load(a) == LOAD_AUTO)
+                   ? (st_last(a->name) == ST_RUNNING) : 0;
+            if (!go) {
+                log_msg("startup: NOT starting '%s' at boot (load=%s%s)",
+                        a->name,
+                        app_load(a) == LOAD_STOP ? "stop" : "auto",
+                        app_load(a) == LOAD_STOP ? ""
+                                : ", last recorded state was not running");
+                continue;
+            }
+            log_msg("startup: starting '%s' at boot (load=auto, last "
+                    "recorded state was running)", a->name);
+        }
         launch_app(a);
         if (a->wait_ms > 0)
             sleep_ms((unsigned)a->wait_ms);
@@ -463,6 +485,7 @@ static int sup_launch(int i)
     g_srt[i].state = 1;
     g_srt[i].code  = -1;
     log_msg("sup: started '%s' pid=%ld", g_sapps[i].name, (long)p);
+    st_record(g_sapps[i].name, ST_RUNNING);
     return 0;
 }
 
@@ -482,9 +505,25 @@ static void sup_boot(void)
         log_msg("startup:   %d. %s", i + 1, g_sapps[order[i]].name);
 
     for (i = 0; i < cnt && !g_quit; i++) {
-        sup_launch(order[i]);
-        if (g_sapps[order[i]].wait_ms > 0)
-            sleep_ms((unsigned)g_sapps[order[i]].wait_ms);
+        int idx = order[i];
+        int lm  = app_load(&g_sapps[idx]);
+        if (lm != LOAD_START) {
+            int go = (lm == LOAD_AUTO)
+                   ? (st_last(g_sapps[idx].name) == ST_RUNNING) : 0;
+            if (!go) {
+                log_msg("startup: NOT starting '%s' at boot (load=%s%s)",
+                        g_sapps[idx].name,
+                        lm == LOAD_STOP ? "stop" : "auto",
+                        lm == LOAD_STOP ? ""
+                                : ", last recorded state was not running");
+                continue;
+            }
+            log_msg("startup: starting '%s' at boot (load=auto, last "
+                    "recorded state was running)", g_sapps[idx].name);
+        }
+        sup_launch(idx);
+        if (g_sapps[idx].wait_ms > 0)
+            sleep_ms((unsigned)g_sapps[idx].wait_ms);
     }
     free(order);
 }
@@ -498,9 +537,11 @@ static int rt_state(int i)
         if (r == g_srt[i].pid) {
             g_srt[i].state = 2;
             g_srt[i].code  = st;
+            st_record(g_sapps[i].name, ST_STOPPED);
         } else if (r < 0) {
             /* ECHILD: never waitable (already reaped elsewhere) */
             g_srt[i].state = 2;
+            st_record(g_sapps[i].name, ST_STOPPED);
         }
     }
     return g_srt[i].state;
@@ -524,6 +565,7 @@ static void sup_stop(int i)
         waitpid(g_srt[i].pid, &g_srt[i].code, 0);
     }
     g_srt[i].state = 2;
+    st_record(g_sapps[i].name, ST_STOPPED);
 }
 
 /* find a name-target for control verbs; an app is only controllable by
@@ -1107,6 +1149,10 @@ int main(int argc, char **argv)
         }
     }
 
+    /* the state log lives next to the runtime log; derive the exe
+     * directory unconditionally for both conf and state defaults */
+    exe_dir(argv[0], exedir, sizeof(exedir));
+
     if (conf) {
         strncpy(chosen, conf, sizeof(chosen) - 1);
         chosen[sizeof(chosen) - 1] = '\0';
@@ -1122,7 +1168,6 @@ int main(int argc, char **argv)
         };
         int k;
 
-        exe_dir(argv[0], exedir, sizeof(exedir));
         chosen[0] = '\0';
         for (k = 0; k < 2; k++) {
             if (strlen(exedir) + strlen(suffixes[k]) + 1
@@ -1142,6 +1187,19 @@ int main(int argc, char **argv)
             strcat(chosen, suffixes[0]);
         }
     }
+
+    /* state log for load = auto decisions (directory: the logs dir of
+     * the release layout, created when permitted; when
+     * BOOTLAUNCHER_LOG is set its own directory is used as-is) */
+    {
+        char logsdir[4608];
+        if (strlen(exedir) + 10 < sizeof(logsdir)) {
+            strcpy(logsdir, exedir);
+            strcat(logsdir, "/../logs");
+            (void)mkdir(logsdir, 0775);  /* exists / not writable: fine */
+        }
+    }
+    st_init(getenv("BOOTLAUNCHER_LOG"), exedir);
 
     if (optind < argc) {
         /* management / CLI mode: inspect or edit the configuration file */
@@ -1235,6 +1293,7 @@ int main(int argc, char **argv)
 
     if (daemon_mode) daemonize();
 
+    g_boot_mode = 1;      /* no-args boot honours load = start/stop/auto */
     log_msg("startup " APPBOOT_VERSION ": configuration file: %s",
             chosen);
     return run_all(chosen) == 0 ? 0 : 1;
