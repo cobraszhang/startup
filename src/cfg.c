@@ -487,7 +487,7 @@ int cfg_save(const char *path, const app_t *apps, int n)
         if (apps[i].ndeps > 0) {
             fputs("deps =", f);
             for (k = 0; k < apps[i].ndeps; k++)
-                fprintf(f, " %s,", apps[i].deps[k]);
+                fprintf(f, "%s %s", k ? "," : "", apps[i].deps[k]);
             fputs("\r\n", f);
         }
         if (apps[i].wait_ms > 0)

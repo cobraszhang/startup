@@ -234,6 +234,17 @@ static void apply_form(void)
             gtk_entry_set_text(GTK_ENTRY(e_name), g_apps[i].name);
             return;
         }
+        /* the model was renamed: repaint the list row so the new name
+         * is visible immediately. rows mirror model order, so update
+         * row i in place (a full refresh would retrigger selection
+         * callbacks mid-commit) */
+        {
+            GtkTreeIter it;
+            if (gtk_tree_model_iter_nth_child(GTK_TREE_MODEL(store_apps),
+                                              &it, NULL, i))
+                gtk_list_store_set(store_apps, &it, 0,
+                                   g_apps[i].name, -1);
+        }
     }
 
     if (cfg_set_field(&g_apps[i], "cmd", cmd) != 0) {

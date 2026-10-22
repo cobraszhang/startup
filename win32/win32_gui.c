@@ -288,6 +288,10 @@ static void apply_form(void)
         free(cwdstr); free(outstr);
             return;
         }
+        /* rename changed the model: repaint the application list and
+         * every derived widget (dependency candidates included) so the
+         * new name is visible immediately, not only after reopening */
+        refresh_list(i);
     }
 
     if (cfg_set_field(&g_apps[i], "cmd", cmd) != 0) {

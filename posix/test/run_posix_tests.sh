@@ -131,6 +131,11 @@ report "cli order" $ok
 if [ "$(cat /tmp/posix-t6c.log)" = "$(printf '1. first\n2. second\n3. three\n4. extra')" ]; then ok=0; else ok=1; fi
 report "cli add/set/dep/rename round-trip" $ok
 
+# 8c': saved deps lists use canonical "a, b" separation (no trailing comma)
+ok=1
+if ! grep -qE '^deps = .*,[[:space:]]*$' "$CLI_T"; then ok=0; fi
+report "saved deps lists have no trailing comma" $ok
+
 # 8d check: cycle detection after making first depend on extra
 ./build/release/startup -c "$CLI_T" dep add first extra >/dev/null 2>&1
 ./build/release/startup -c "$CLI_T" check >/tmp/posix-t6d.log 2>&1
