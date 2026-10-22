@@ -2,7 +2,10 @@
 win32/build/
 posix/build/
 
-# VC6 IDE 缓存（工程文件 startup.dsp/.dsw 是跟踪的，这些随 IDE 打开重新生成）
+# VC6 IDE 缓存与 IDE 构建输出（工程 Output_Dir 为 win32/Debug、win32/Release；
+# 命令行脚本的产物在 win32/build/，互不重叠）
+win32/Debug/
+win32/Release/
 win32/*.ncb
 win32/*.opt
 win32/*.plg
