@@ -999,21 +999,26 @@ static int svc_elevated(const char *what)
 /* "install" covers both halves of the boot model: the system-side
  * service AND this user's autostart entry for the user-side
  * supervisor, so application-class entries actually start at logon.
- * The Run value is written by this (unelevated) process - the
- * interactive user's own HKCU - even when service creation itself
- * goes through UAC. install-user / uninstall-user remain available to
- * manage only one half. */
+ * The Run value is written FIRST and unconditionally by this
+ * (unelevated) process - the interactive user's own HKCU - so an
+ * already-created or failing service half never silently skips the
+ * autostart half (that is what left application-class entries
+ * unloaded when "install" was clicked with the service already
+ * present). install-user / uninstall-user remain available to manage
+ * only one half. */
 int svc_install(void)
 {
-    int rc = svc_control("install", 1);
-    if (rc == 0) runreg_control("install-user");
+    int rc;
+    runreg_control("install-user");
+    rc = svc_control("install", 1);
     return rc;
 }
 
 int svc_uninstall(void)
 {
-    int rc = svc_control("uninstall", 0);
-    if (rc == 0) runreg_control("uninstall-user");
+    int rc;
+    runreg_control("uninstall-user");
+    rc = svc_control("uninstall", 0);
     return rc;
 }
 
