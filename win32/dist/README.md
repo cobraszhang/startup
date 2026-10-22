@@ -60,12 +60,16 @@ posix/              *nix 平台源文件与工程文件
 当前发布版本：**v0.2.5**（git 标签 `v0.2.5`）。
 
 版本号的单一来源是 `src/version.h`（`APPBOOT_VERSION`），CLI 的 `version` 子命令、
-`-V`、usage 头行、两版 GUI 窗口标题和服务日志都从这里取。发版时同步三处：
+`-V`、usage 头行、两版 GUI 窗口标题和服务日志都从这里取。发版时同步四处：
 
 1. 修改 `src/version.h`；
 2. 修改 `win32/appboot.rc` 里的 `FILEVERSION/PRODUCTVERSION/String`（Windows
    文件版本属性，构建时嵌入四个 exe）；
-3. `git tag v<版本号>`。
+3. `git tag v<版本号>`；
+4. 导出本机版本归档并登记历史（每个版本号都必须有，规则固定）：
+   `git archive --format=zip --prefix="startup-<版本号>/" -o D:\my\dev\startup-<版本号>.zip v<版本号>`
+   （含源码与各版本已构建的 dist 二进制；现有归档 `d:\my\dev\startup-0.1.1 … 0.2.5.zip`），
+   同时在根目录 `history.txt`（ASCII/LF）追加该版本的变更记录。
 
 ## 发布包布局
 
