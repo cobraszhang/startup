@@ -9,7 +9,7 @@
 
 | 版本 | 入口 | 开机自启方式 |
 |---|---|---|
-| Win32 | `win32/win32_service.c`（服务/CLI 入口）+ `win32/win32_gui.c`（无参数时的配置/状态窗口）+ 共享 `src/cli.c` | 系统类：**Windows 系统服务**（延迟自启，SCM 开机拉起）；用户类：**当前用户 Run 注册项**（`install-user` 写入，登录时拉起 `user` supervisor） |
+| Win32 | `win32/win32_service.c`（服务/CLI 入口）+ `win32/win32_gui.c`（无参数时的配置/状态窗口）+ 共享 `src/cli.c` | 系统类：**Windows 系统服务**（自动启动，登录前的开机阶段拉起；v0.2.1 起，旧安装的“延迟自启”会在服务启动时自动纠正）；用户类：**当前用户 Run 注册项**（`install` 一并写入；登录时拉起 `user` supervisor） |
 | POSIX | `posix/posix_main.c`（开机/supervisor/CLI 入口）+ 共享 `src/cli.c` | 系统类：systemd unit（`serve`）/ SysV / rc.local；用户类：XDG autostart / 会话脚本（`user`，见 contrib/startup-user.*） |
 
 ## 目录结构
@@ -21,7 +21,7 @@ src/                仅放跨平台共享源文件（纯 C89）
   topo.[ch]           Kahn 拓扑排序 + 环检测 / 未知依赖检测（按 system/application 类别两阶段）
   log.[ch]            带时间戳的日志（可重定向到 GUI）
   cli.[ch]            共享命令行管理接口（Win32 与 POSIX 同一个 cli_main）
-  version.h           发布版本号单一来源（当前 0.2.0）
+  version.h           发布版本号单一来源（当前 0.2.1）
   ipc.[ch]            服务进程↔用户进程控制协议（共享语法与客户端调用）
 
 win32/              Win32 平台源文件与工程文件
@@ -54,7 +54,7 @@ posix/              *nix 平台源文件与工程文件
 
 ## 版本
 
-当前发布版本：**v0.2.0**（git 标签 `v0.2.0`）。
+当前发布版本：**v0.2.1**（git 标签 `v0.2.1`）。
 
 版本号的单一来源是 `src/version.h`（`APPBOOT_VERSION`），CLI 的 `version` 子命令、
 `-V`、usage 头行、两版 GUI 窗口标题和服务日志都从这里取。发版时同步三处：
@@ -140,15 +140,18 @@ deps = appserver                      ; 用户类依赖系统类：跨类别，�
 
 | 类别 | 配置 | 由谁启动（Win32） | 由谁启动（POSIX） | 控制端点 |
 |---|---|---|---|---|
-| 系统类 | 缺省或 `type = system` | Windows 服务 `AppBootLauncher`（`install`，延迟自启） | systemd `startup.service`（`serve`）/ SysV | `\\.\pipe\AppBootLauncher` / `/tmp/bootlauncher.ctl` |
-| 用户类 | `type = application` | 当前用户 Run 注册项（`install-user` 写 `AppBootLauncherUser` → `"exe" user`） | XDG autostart（contrib/startup-user.desktop）或会话脚本（contrib/startup-user.sh），执行 `startup -d user` | `\\.\pipe\AppBootLauncherUser` / `/tmp/bootlauncher-user.ctl` |
+| 系统类 | 缺省或 `type = system` | Windows 服务 `AppBootLauncher`（`install`，自动启动：登录前的开机阶段拉起） | systemd `startup.service`（`serve`）/ SysV | `\\.\pipe\AppBootLauncher` / `/tmp/bootlauncher.ctl` |
+| 用户类 | `type = application` | 当前用户 Run 注册项（`install` 一并写入；单独 `install-user` 写 `AppBootLauncherUser` → `"exe" user`） | XDG autostart（contrib/startup-user.desktop）或会话脚本（contrib/startup-user.sh），执行 `startup -d user` | `\\.\pipe\AppBootLauncherUser` / `/tmp/bootlauncher-user.ctl` |
 
 顺序保证（`user` 入口在启动任何用户类应用之前）：
 
 - **Win32**：轮询服务控制管理器——服务 `RUNNING` **且系统端控制管道应答 PONG** 才继续。
   控制接口是在系统类全部启动**之后**才打开的，所以 PONG 即代表系统侧已完成。
-  服务未安装或已安装但未运行（如手动启动型）→ 不等待，直接开始（没有系统侧可等）。
-  服务处于启动中则最多等 `BOOTLAUNCHER_WAITMAX` 秒（缺省 120，超时告警后继续）。
+  是否等待一个尚未运行的服务，由其**启动类型**决定（不是当前状态）：服务为
+  **自动启动**时即使登录瞬间还没跑起来也照常等待（Run 项往往比服务先起）；
+  手动/禁用则不等待，未安装服务也从不阻塞。等待上限 `BOOTLAUNCHER_WAITMAX` 秒
+  （缺省 120，超时告警后继续）。v0.2.1 起服务进程启动时会把旧的“自动(延迟启动)”
+  安装自动纠正为普通自动启动——否则服务要等到登录后 1-3 分钟才起，用户类会抢在前面。
 - **POSIX**：等待系统端套接字文件出现（同样只在系统类全部启动后创建），上限
   `BOOTLAUNCHER_WAITMAX` 秒（缺省 60，`0` = 不等）。
 
@@ -361,7 +364,7 @@ win32\build\release\startup-gcc.exe                  :: 无参数：打开 GUI �
 win32\build\release\startup-gcc.exe service          :: 服务入口（SCM 用；install 时自动写入 binPath）
 win32\build\release\startup-gcc.exe serve            :: 前台 supervisor（系统类；不注册服务，也有控制接口）
 win32\build\release\startup-gcc.exe user             :: 用户侧 supervisor（只启动 application 类；先等系统侧完成；隐藏自身控制台）
-win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动-延迟启动：所有自启动服务完成后、登录前拉起；非管理员自动 UAC 提权），同时写当前用户的登录 Run 项拉起用户侧（application 类随之加载）
+win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动启动：登录前的开机阶段拉起；非管理员自动 UAC 提权），同时写当前用户的登录 Run 项拉起用户侧（application 类随之加载）
 win32\build\release\startup-gcc.exe install-user     :: 只写当前用户 Run 项 AppBootLauncherUser -> "exe" user（登录即启动用户侧；无需管理员）
 win32\build\release\startup-gcc.exe uninstall-user   :: 只删除该 Run 项
 win32\build\release\startup-gcc.exe start | stop | uninstall   :: uninstall 会先停服务并等待其停止再真正删除（并移除当前用户的 Run 项）
@@ -416,10 +419,10 @@ POSIX 规则（有执行位的文件本就可直接运行，内核会认它的 s
 无运行时拒绝）。
 
 - 服务注册的 binPath 为 `"<exe>" service`，开机由 SCM 带 `service` 参数拉起。
-- **开机启动被刻意推迟**：install 会把服务设为“自动(延迟启动)”
-  （`ChangeServiceConfig2` + `SERVICE_CONFIG_DELAYED_AUTO_START_INFO`）。SCM 先完成全部
-  普通自启动服务的启动，**开机流程收尾时才拉起本服务**（仍在任何用户登录之前），不与
-  其他服务争抢启动资源；手动 `start` / GUI“启动服务”不受影响，随时可用。
+- **服务为普通“自动启动”**：SCM 在**登录之前的开机阶段**（autostart 服务组）拉起它，
+  因此系统类先于任何登录、也先于用户类 Run 项。（v0.2.0 曾刻意用“自动(延迟启动)”，
+  实测会被登录后的用户侧抢在前面——v0.2.1 起安装即普通自动启动，旧安装的服务进程
+  启动时还会自动把启动类型纠正过来。）
 - `service`/`serve` 都以 supervisor 模式常驻：启动全部应用后保留其句柄，并在命名管道
   `\\.\pipe\AppBootLauncher` 上提供 `app start|stop|restart|status` 控制接口
   （见“进程模型与控制接口”）；`net stop` 只结束服务进程，应用留在系统里。
@@ -438,8 +441,7 @@ POSIX 规则（有执行位的文件本就可直接运行，内核会认它的 s
   `STARTUP_ELEV` 标记防止递归提权；用户取消弹窗则报 -1223）。`uninstall` 先向运行中的
   服务发停止请求并**等待其真正停止**（最长 10 秒）再 `DeleteService`，避免“只标记删除、
   服务仍在列表”的假象。
-- 也可用系统命令注册：`sc create AppBootLauncher binPath= "\"D:\...\bin\startup-gcc.exe\" service" start= auto` 然后
-  `sc config AppBootLauncher start= delayed-auto`（延迟启动）。
+- 也可用系统命令注册：`sc create AppBootLauncher binPath= "\"D:\...\bin\startup-gcc.exe\" service" start= auto`。
 - 完整生命周期可用 `win32\test\svc_lifecycle.cmd` 一键验证（管理员直接跑；非管理员则
   install/uninstall 自动走 UAC 提权路径），含“卸载后 `sc query` 必须 1060（彻底消失）”断言。
 - 编码说明：`win32\win32_gui.c` 与 `win32\conf\startup.conf` 保存为 **GBK（代码页 936）**，
@@ -528,6 +530,14 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 
 ## 已通过的验证
 
+- **v0.2.1 启动次序修正**（真机反馈：开机后 application 先于 system 启动）：原因
+  ① 服务装成“自动(延迟启动)”，登录前没起、登录后 1-3 分钟才起；② `wait_system_ready`
+  对“已安装但 STOPPED”的服务直接放行——Run 项登录瞬间就把用户类拉了起来。修复：
+  install 改用**普通自动启动**（登录前的开机阶段），服务进程启动时 `ensure_autostart`
+  把旧的延迟配置自动纠正；等待判定改为看**启动类型**——自动启动的服务即使尚未运行也
+  等待（上限 `BOOTLAUNCHER_WAITMAX`），只有手动/禁用/未安装才不阻塞。
+  另：`svc_install/svc_uninstall` 的 Run 项注册改为**无条件先写**，服务已存在时
+  点击“安装服务”不再静默跳过用户侧注册（现场真因）。
 - **两类启动（`type = system | application`）**：核心排序改为类别分区两阶段
   （系统类阶段 → 用户类阶段，阶段内仍按 deps 拓扑、同层按配置文件顺序；跨阶段前向
   依赖自动满足；系统类依赖用户类报 -4 错误）。新增 `user` 入口（用户侧 supervisor，
@@ -662,9 +672,9 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 - 仅 ANSI（A 系）Win32 API；路径含非 ASCII 时建议配置文件与程序目录使用 ASCII 路径。
 - POSIX 的 GTK 配置窗口暂不编辑 `cwd`/`output`/`type` 字段（打开含这些字段的配置再保存，
   字段经共享模型原样保留，不丢失）；Win32 配置窗口与 CLI 均可编辑。
-- 用户侧就绪判定：Win32 以“服务 RUNNING + 系统端 PONG”为准——服务**已安装但未运行**
-  （手动启动型未开）时用户侧不等待直接启动（没有系统侧可等，属预期）；POSIX 以
-  “系统端套接字文件存在”为准（超时上限 `BOOTLAUNCHER_WAITMAX`）。
+- 用户侧就绪判定：Win32 以“服务 RUNNING + 系统端 PONG”为准；服务是否值得等待由其
+  **启动类型**决定（自动启动→未运行也等；手动/禁用/未安装→不阻塞），等待上限
+  `BOOTLAUNCHER_WAITMAX`；POSIX 以“系统端套接字文件存在”为准（同上限，缺省 60）。
 - Win32 `user` 入口由 Run 项拉起时其控制台窗口会短暂出现再被隐藏（GetConsoleWindow +
   ShowWindow），无闪窗控制（无托盘图标，进程常驻）。多用户快速切换时各用户登录各自
   触发自己的 Run 项，多个用户侧 supervisor 各自独立（端点同名会冲突，可在 Run 值里

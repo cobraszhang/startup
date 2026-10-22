@@ -211,14 +211,20 @@ static void hide_console(void)
 /* User applications must never start before system services: wait
  * until the system-side service is RUNNING *and* its control interface
  * answers (that interface opens only after every system-class app has
- * been launched). A service that is merely installed-but-not-running
- * (e.g. manual start type) does not block the user side. */
+ * been launched). Whether a not-running service is waited for is
+ * decided by its START TYPE, not its current state: an automatic-start
+ * service (plain or delayed) is expected to come up, so a service that
+ * simply has not started yet (typical right after logon with a
+ * Run-entry user side) is waited for. A manual or disabled service is
+ * not waited for, and no installed service at all never blocks. */
 static void wait_system_ready(void)
 {
-    SC_HANDLE       scm, svc;
-    SERVICE_STATUS  st;
-    const char     *w;
-    DWORD           t0, cap_ms;
+    SC_HANDLE              scm, svc;
+    SERVICE_STATUS         st;
+    QUERY_SERVICE_CONFIG  *q = NULL;
+    const char            *w;
+    DWORD                  t0, cap_ms, need = 0;
+    int                    expect_auto = 0;
 
     w = getenv("BOOTLAUNCHER_WAITMAX");           /* seconds */
     cap_ms = (w && *w) ? (DWORD)atoi(w) * 1000u : 120000u;
@@ -229,13 +235,42 @@ static void wait_system_ready(void)
                 "starting user apps without waiting");
         return;
     }
-    svc = OpenServiceA(scm, SERVICE_NAME, SERVICE_QUERY_STATUS);
+    svc = OpenServiceA(scm, SERVICE_NAME,
+                       SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
     if (!svc) {
         log_msg("user: no system-side service installed; "
                 "starting user apps directly");
         CloseServiceHandle(scm);
         return;
     }
+
+    QueryServiceConfigA(svc, NULL, 0, &need);
+    if (need) {
+        q = malloc(need);
+        if (q && !QueryServiceConfigA(svc, q, need, &need)) {
+            free(q);
+            q = NULL;
+        }
+    }
+    if (q) {
+        expect_auto = (q->dwStartType == SERVICE_AUTO_START);
+        free(q);
+        q = NULL;
+        if (!expect_auto) {
+            log_msg("user: service start type is manual or disabled; "
+                    "not waiting");
+            CloseServiceHandle(svc);
+            CloseServiceHandle(scm);
+            return;
+        }
+    } else {
+        log_msg("user: could not query the service start type; "
+                "not waiting");
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        return;
+    }
+
     t0 = GetTickCount();
     for (;;) {
         if (QueryServiceStatus(svc, &st) &&
@@ -251,14 +286,9 @@ static void wait_system_ready(void)
                 ipc_client_close(c);
             }
             if (got > 0 && strncmp(r, "OK", 2) == 0) break; /* ready */
-        } else if (QueryServiceStatus(svc, &st) &&
-                   st.dwCurrentState != SERVICE_START_PENDING &&
-                   st.dwCurrentState != SERVICE_STOP_PENDING) {
-            log_msg("user: system-side service is installed but not "
-                    "running (state=%lu); starting user apps anyway",
-                    (unsigned long)st.dwCurrentState);
-            break;
         }
+        /* an automatic-start service is expected: keep polling through
+         * STOPPED/START_PENDING until it answers or the cap expires */
         if (GetTickCount() - t0 > cap_ms) {
             log_msg("user: WARNING system side not ready after %lu s; "
                     "starting anyway", (unsigned long)(cap_ms / 1000u));
@@ -847,6 +877,51 @@ static void setup_service_logging(const char *exe)
     putenv(envbuf);
 }
 
+/* Older installs were created as "Automatic (Delayed Start)"; that
+ * lets the user side (a logon Run entry) race ahead of the service.
+ * Correct an installed service to plain automatic start on service
+ * startup. LocalSystem may reconfigure its own service; the service
+ * process runs as LocalSystem, so no elevation is involved. */
+static void ensure_autostart(void)
+{
+    SC_HANDLE             scm, svc;
+    QUERY_SERVICE_CONFIG *q = NULL;
+    DWORD                 need = 0;
+
+    scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!scm) return;
+    svc = OpenServiceA(scm, SERVICE_NAME,
+                       SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG);
+    if (!svc) {
+        CloseServiceHandle(scm);
+        return;
+    }
+    QueryServiceConfigA(svc, NULL, 0, &need);
+    if (need) {
+        q = malloc(need);
+        if (q && !QueryServiceConfigA(svc, q, need, &need)) {
+            free(q);
+            q = NULL;
+        }
+    }
+    if (q && q->dwStartType != SERVICE_AUTO_START) {
+        if (ChangeServiceConfigA(svc, SERVICE_NO_CHANGE,
+                                 SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                                 NULL, NULL, NULL, NULL, NULL, NULL,
+                                 NULL)) {
+            log_msg("service: start type corrected from %lu to automatic "
+                    "(system apps must start before logon)",
+                    (unsigned long)q->dwStartType);
+        } else {
+            log_msg("service: could not correct start type err=%lu",
+                    (unsigned long)GetLastError());
+        }
+    }
+    if (q) free(q);
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+}
+
 static void WINAPI service_main(DWORD argc, char **argv)
 {
     char conf[MAX_PATH * 2];
@@ -873,6 +948,7 @@ static void WINAPI service_main(DWORD argc, char **argv)
     default_conf_path(exe, conf, sizeof(conf));
     log_msg("service: startup " APPBOOT_VERSION
             ", configuration file: %s", conf);
+    ensure_autostart();
 
     report_status(SERVICE_RUNNING, 0);
 
@@ -909,38 +985,6 @@ static void WINAPI service_main(DWORD argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* install / uninstall / start / stop helpers                           */
 /* ------------------------------------------------------------------ */
-
-/* Vista+ "Automatic (Delayed Start)": the SCM finishes ALL normal
- * auto-start services first, then starts this one - as part of the boot
- * flow, before any interactive user logs in. Manual 'start' is
- * unaffected. VC6 headers do not carry this info level. */
-#ifndef SERVICE_CONFIG_DELAYED_AUTO_START_INFO
-#define SERVICE_CONFIG_DELAYED_AUTO_START_INFO 3
-#endif
-typedef struct { BOOL fDelayedAutostart; } delayed_autostart_t;
-
-static void set_delayed_autostart(SC_HANDLE svc)
-{
-    delayed_autostart_t  want;
-    BYTE                 buf[64];
-    DWORD                need = 0;
-
-    want.fDelayedAutostart = TRUE;
-    if (!ChangeServiceConfig2A(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
-                               &want)) {
-        log_msg("install: could not enable delayed auto-start err=%lu",
-                (unsigned long)GetLastError());
-        return;
-    }
-    if (QueryServiceConfig2A(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
-                             buf, sizeof(buf), &need) &&
-        need >= sizeof(delayed_autostart_t) &&
-        ((delayed_autostart_t *)buf)->fDelayedAutostart)
-        log_msg("install: boot start deferred until all auto-start "
-                "services are up (delayed auto-start)");
-    else
-        log_msg("install: WARNING: delayed auto-start not confirmed");
-}
 
 /* Run this same executable once more with administrator rights
  * (ShellExecute "runas" shows the UAC prompt). Waits for the elevated
@@ -1057,9 +1101,8 @@ int svc_control(const char *what, int needs_create)
                              SERVICE_ERROR_NORMAL,
                              binpath, NULL, NULL, NULL, NULL, NULL);
         if (svc) {
-            set_delayed_autostart(svc);
-            log_msg("%s: service '%s' created (auto start, delayed)",
-                    what, SERVICE_NAME);
+            log_msg("%s: service '%s' created (automatic start, boot "
+                    "phase before logon)", what, SERVICE_NAME);
             ok = 1;
             CloseServiceHandle(svc);
         } else {
@@ -1132,13 +1175,15 @@ static void usage(const char *prog)
         "usage: %s [command] [-c config-file] [-s control-endpoint]\n"
         "  default config: <exe dir>\\..\\conf\\startup.conf\n"
         "  (no command)  open the configuration/status GUI window\n"
-        "  service       run as Windows service (SCM entry point)\n"
+        "  service       run as Windows service (SCM entry point)\n",
+        prog);
+    fprintf(stderr,
         "  serve         foreground supervisor with the control IPC\n"
         "  user          user-side supervisor (application-class only;\n"
         "                starts after the system side; hides its console)\n"
         "  install       create service '%s' with automatic start AND\n"
         "                this user's logon entry for 'user' (both sides)\n",
-        prog, SERVICE_NAME);
+        SERVICE_NAME);
     fprintf(stderr,
         "  uninstall     remove the service and this user's logon entry\n"
         "  install-user  add the current-user Run entry for 'user'\n"
