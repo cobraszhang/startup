@@ -10,7 +10,16 @@ typedef struct app {
     int    wait_ms;  /* pause after starting this app (before others)  */
     char  *cwd;      /* initial working directory, NULL = inherit      */
     char  *output;   /* file for child stdout+stderr, NULL = none      */
+    char  *type;     /* "system"/"application", NULL = "system"        */
 } app_t;
+
+/* startup class of one entry: KIND_SYSTEM entries are started by the
+ * system-side launcher (Win32 service / systemd unit), KIND_APP entries
+ * by the user-side launcher (Win32 Run entry / user autostart).
+ * User applications must never start before system services. */
+#define KIND_SYSTEM 0
+#define KIND_APP    1
+int  app_kind(const app_t *a);  /* from a->type; default system */
 
 /* Load configuration from file. Returns 0 on success and stores an
  * array of n apps in *apps_out; returns non-zero on any parse error. */
@@ -33,8 +42,9 @@ int  cfg_remove(app_t **apps, int *n, const char *name);
 /* Rename entry; other apps' dependency references follow. */
 int  cfg_rename(app_t *apps, int n, const char *oldname, const char *newname);
 
-/* Set "cmd", "wait", "cwd" or "output" field of one app (empty value
- * clears cwd/output). */
+/* Set "cmd", "wait", "cwd", "output" or "type" field of one app
+ * (empty value clears cwd/output/type; type must be "system" or
+ * "application"). */
 int  cfg_set_field(app_t *a, const char *key, const char *val);
 
 /* Add/remove a dependency; dep must name an existing app (add). */

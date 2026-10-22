@@ -336,7 +336,7 @@ static void check_or_run(int run_after)
     char   tmp[] = "/tmp/appboot_check.conf";
     app_t *apps = NULL;
     int   *order = NULL;
-    int    n = 0, rc, i;
+    int    n = 0, rc, i, cnt = 0;
 
     apply_form();
     if (model_ok() != 0) { g_rc = 1; return; }
@@ -351,7 +351,7 @@ static void check_or_run(int run_after)
         g_rc = 1;
         return;
     }
-    rc = topo_sort(apps, n, &order);
+    rc = topo_sort(apps, n, TOPO_ALL, &order, &cnt);
     if (rc != 0) {
         status_printf("依赖排序失败（代码 %d），详见日志", rc);
         cfg_free(apps, n);
@@ -360,7 +360,7 @@ static void check_or_run(int run_after)
         return;
     }
     status_printf("校验通过：%d 个应用，启动顺序：", n);
-    for (i = 0; i < n; i++)
+    for (i = 0; i < cnt; i++)
         status_printf("  %d. %s", i + 1, apps[order[i]].name);
     free(order);
     cfg_free(apps, n);

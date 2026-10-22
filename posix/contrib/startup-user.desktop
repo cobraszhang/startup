@@ -1,0 +1,17 @@
+# XDG autostart entry for the user-side supervisor
+# (starts application-class entries only, AFTER the system-side
+# supervisor has finished starting every system-class app):
+#   mkdir -p ~/.config/autostart
+#   cp contrib/startup-user.desktop ~/.config/autostart/
+#   (edit the Exec path to match your installation)
+#
+# The wait is bounded (default 60 s, BOOTLAUNCHER_WAITMAX=<seconds>,
+# 0 starts immediately) so a machine without the system side is not
+# held up. See contrib/startup.service for the system side.
+[Desktop Entry]
+Type=Application
+Name=AppBootLauncher user supervisor
+Comment=Start user-class applications after system services
+Exec=/usr/local/bin/startup -d user
+Terminal=false
+X-GNOME-Autostart-enabled=true

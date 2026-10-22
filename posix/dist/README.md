@@ -1,13 +1,16 @@
 # 开机自动加载应用启动器（boot-time application launcher）
 
 按配置文件中的 **依赖关系（deps）** 决定应用的启动顺序：先做拓扑排序，再按序启动。
+启动分为 **两个类别**（`type = system | application`，见“两类启动：系统服务与用户程序”）：
+系统类由开机侧（Win32 服务 / systemd）启动，用户类由登录侧（Win32 用户启动注册项 /
+桌面 autostart 脚本）启动，**用户程序永不先于系统服务启动**。
 服务进程常驻运行，并对登录后的用户进程提供 **控制接口（IPC）**：启动/中止/重启/状态
 （见“进程模型与控制接口”）。提供两个版本，共享同一套纯 **C89** 核心代码：
 
 | 版本 | 入口 | 开机自启方式 |
 |---|---|---|
-| Win32 | `win32/win32_service.c`（服务/CLI 入口）+ `win32/win32_gui.c`（无参数时的配置/状态窗口）+ 共享 `src/cli.c` | **Windows 系统服务**（`SERVICE_AUTO_START`，由 SCM 开机拉起；supervisor 常驻） |
-| POSIX | `posix/posix_main.c`（开机/supervisor/CLI 入口）+ 共享 `src/cli.c` | systemd unit（`serve` 常驻 supervisor）/ SysV / rc.local；一次性开机模式仍保留 |
+| Win32 | `win32/win32_service.c`（服务/CLI 入口）+ `win32/win32_gui.c`（无参数时的配置/状态窗口）+ 共享 `src/cli.c` | 系统类：**Windows 系统服务**（延迟自启，SCM 开机拉起）；用户类：**当前用户 Run 注册项**（`install-user` 写入，登录时拉起 `user` supervisor） |
+| POSIX | `posix/posix_main.c`（开机/supervisor/CLI 入口）+ 共享 `src/cli.c` | 系统类：systemd unit（`serve`）/ SysV / rc.local；用户类：XDG autostart / 会话脚本（`user`，见 contrib/startup-user.*） |
 
 ## 目录结构
 
@@ -15,10 +18,10 @@
 README.md .gitignore .gitattributes      根目录：说明与 git 文件
 src/                仅放跨平台共享源文件（纯 C89）
   cfg.[ch]            配置解析 + 共享模型编辑/保存（add/rm/rename/set/deps、cfg_save）
-  topo.[ch]           Kahn 拓扑排序 + 环检测 / 未知依赖检测
+  topo.[ch]           Kahn 拓扑排序 + 环检测 / 未知依赖检测（按 system/application 类别两阶段）
   log.[ch]            带时间戳的日志（可重定向到 GUI）
   cli.[ch]            共享命令行管理接口（Win32 与 POSIX 同一个 cli_main）
-  version.h           发布版本号单一来源（当前 0.1.1）
+  version.h           发布版本号单一来源（当前 0.2.0）
   ipc.[ch]            服务进程↔用户进程控制协议（共享语法与客户端调用）
 
 win32/              Win32 平台源文件与工程文件
@@ -51,7 +54,7 @@ posix/              *nix 平台源文件与工程文件
 
 ## 版本
 
-当前发布版本：**v0.1.1**（git 标签 `v0.1.1`）。
+当前发布版本：**v0.2.0**（git 标签 `v0.2.0`）。
 
 版本号的单一来源是 `src/version.h`（`APPBOOT_VERSION`），CLI 的 `version` 子命令、
 `-V`、usage 头行、两版 GUI 窗口标题和服务日志都从这里取。发版时同步三处：
@@ -73,11 +76,12 @@ win32\dist\                 posix/dist/
   README.md
 ```
 
-- Windows：`win32\package_win32.cmd`（自动先调用 build_win32.cmd）
+- Windows：`win32\package_win32.cmd`（自动先调用 build_win32.cmd；**只更新 bin 与
+  README，`dist\conf\startup.conf` 是现场用户配置，从不覆盖**，仅在缺失时用样例播种）
 - POSIX：`cd posix && make package`
 
 部署 = 把 `win32\dist`（或 `posix/dist`）整体拷到目标机器任意目录；服务注册：
-`<安装目录>\bin\startup-gcc.exe install`（管理员）。
+`<安装目录>\bin\startup-gcc.exe install`（非管理员会自动弹出 UAC 提权确认）。
 
 ## 配置文件位置
 
@@ -109,15 +113,62 @@ deps = logging                            ; 必须先于本应用启动的名字
 [appserver]
 cmd = C:\tools\appserver.exe
 deps = database, logging
+cwd = D:\tools                        ; 初始工作目录（可选；含空格加引号）
+output = D:\logs\appserver.log        ; 子进程 stdout+stderr 追加到文件（可选）
+
+[traytool]
+cmd = C:\tools\tray.exe
+type = application                    ; 用户类：登录时由用户侧 supervisor 启动（可选，默认 system）
+deps = appserver                      ; 用户类依赖系统类：跨类别，天然满足（系统类必然先启动）
 ```
 
 语义：
 
-- `deps` 构成有向依赖图，启动顺序 = 拓扑序（Kahn 算法）。同层就绪的应用按配置文件中出现的先后启动（确定性）。
+- `deps` 构成有向依赖图，启动顺序 = 拓扑序（Kahn 算法）。同层就绪的应用按配置文件中出现的先后启动（确定性）。**类别规则优先于依赖**：所有系统类先于任何用户类（见下一节），用户类对系统类的依赖由该规则天然满足；**系统类依赖用户类是错误**（`check`/`order` 报错，退出码非 0）。
 - 依赖了不存在的名字 → 报错退出（不启动任何应用）。
 - 存在依赖环 → 报错并列出环上的应用，退出。
 - `wait` 是启动某应用后的缓冲时间，用于给依赖它的下一个应用留出初始化时间；Win32 版中该等待可被服务停止请求打断。
+- `cwd` 设定应用的初始工作目录（留空 = 继承启动方）。很多程序把数据、日志、会话目录解析到工作目录上——POSIX 侧子进程先 `chdir`（失败则该应用不启动并报错），Win32 侧传给 `CreateProcess` 的 `lpCurrentDirectory`。
+- `output` 把子进程的 stdout+stderr **追加**写入该文件（POSIX 用 `dup2`，Win32 用 `STARTF_USESTDHANDLES`；文件打开失败仍照常启动，仅记一条日志）。有了它就不再需要 `cmd /c … > 日志` 这类包装——**包装会让 supervisor 监控到包装进程而非应用主进程**，状态与控制都会失真。
+- `type` 指定启动类别：`system`（缺省，不写即系统类）或 `application`。两个类别由**不同的启动方**拉起并各自常驻 supervisor（详见“两类启动”）：系统类由开机侧启动，用户类由登录侧启动；`type` 只接受这两个值，其他值报解析错误。旧配置（无 `type` 键）行为与之前完全一致（全部按系统类两阶段序启动）。
 - 已启动的应用在停止/卸载服务时**不会被杀掉**（有意为之，应用生命周期归其自身管理）。
+
+## 两类启动：系统服务与用户程序
+
+把开机启动分成两类，是为了让**用户程序永不先于系统服务启动**，并把用户态程序放进
+用户自己的会话与登录环境（无需系统服务代为启动）：
+
+| 类别 | 配置 | 由谁启动（Win32） | 由谁启动（POSIX） | 控制端点 |
+|---|---|---|---|---|
+| 系统类 | 缺省或 `type = system` | Windows 服务 `AppBootLauncher`（`install`，延迟自启） | systemd `startup.service`（`serve`）/ SysV | `\\.\pipe\AppBootLauncher` / `/tmp/bootlauncher.ctl` |
+| 用户类 | `type = application` | 当前用户 Run 注册项（`install-user` 写 `AppBootLauncherUser` → `"exe" user`） | XDG autostart（contrib/startup-user.desktop）或会话脚本（contrib/startup-user.sh），执行 `startup -d user` | `\\.\pipe\AppBootLauncherUser` / `/tmp/bootlauncher-user.ctl` |
+
+顺序保证（`user` 入口在启动任何用户类应用之前）：
+
+- **Win32**：轮询服务控制管理器——服务 `RUNNING` **且系统端控制管道应答 PONG** 才继续。
+  控制接口是在系统类全部启动**之后**才打开的，所以 PONG 即代表系统侧已完成。
+  服务未安装或已安装但未运行（如手动启动型）→ 不等待，直接开始（没有系统侧可等）。
+  服务处于启动中则最多等 `BOOTLAUNCHER_WAITMAX` 秒（缺省 120，超时告警后继续）。
+- **POSIX**：等待系统端套接字文件出现（同样只在系统类全部启动后创建），上限
+  `BOOTLAUNCHER_WAITMAX` 秒（缺省 60，`0` = 不等）。
+
+两侧 supervisor 各自只启动、只列出、只控制自己类别的条目（`app` 请求发错侧会收到
+`ERR 'x' is a application-class app; ask the user supervisor` 这样的明确提示）。
+CLI 的 `app` 子命令自动跨两端：`list/status/shutdown` 不带名字时**合并**两个 supervisor
+的应答；带名字的操作先问系统端、失败再问用户端（GUI 进程控制区同理）。
+`run`/`order`/`check`（一次性、非 supervisor）把**全部**条目按两阶段处理：系统类在前、
+用户类在后，各自阶段内仍按 deps 拓扑序——对无 `type` 的旧配置输出与之前逐字节一致。
+
+用户类进程在用户自己的会话中直接启动（Win32 用户侧 supervisor 是普通用户进程，
+`CreateProcess` 直接继承用户环境；不再走服务的 WTS 令牌路径）。Win32 的 `user` 入口
+会隐藏自己的控制台窗口；`-c/-s` 选项对 `user` 同样有效（测试与自定义部署用）。
+日志与系统侧共用 `<安装目录>\logs\startup.log`（追加模式，多进程安全）。
+
+- Win32 注册：`startup-gcc.exe install`（系统类服务，UAC）与 `startup-gcc.exe install-user`
+  （当前用户 Run 项，无需管理员）互相独立；`uninstall` / `uninstall-user` 对应删除。
+- POSIX：系统类仍是 unit 文件方式（contrib/startup.service）；用户类把
+  contrib/startup-user.desktop 复制到 `~/.config/autostart/`（改 Exec 路径）或在会话
+  脚本里 `startup -d user &`。
 
 ## 命令行管理接口（CLI，两版通用）
 
@@ -126,20 +177,23 @@ deps = database, logging
 （GUI 的“保存配置”走同一函数，两边产出逐字节一致）。
 
 ```
-list                     列出所有应用（cmd/deps/wait）
-order                    打印按依赖解析出的启动顺序
-check                    仅校验配置（解析 + 拓扑）
-run                      校验后按序启动全部应用
+list                     列出所有应用（cmd/type/deps/wait/cwd/output；type 显示生效类别）
+order                    打印按依赖解析出的启动顺序（系统类全部在前，再用户类）
+check                    仅校验配置（解析 + 拓扑 + 类别规则）
+run                      校验后按序启动全部应用（同样两阶段）
 add <name> <cmdline>     新增应用（命令行可直接跟在后面，可不加引号）
 rm <name>                删除应用（其他应用对它的依赖引用一并清除）
 rename <old> <new>       改名（其他应用的依赖引用自动跟随）
 set <name> cmd <line>    修改命令行
 set <name> wait <ms>     修改启动后等待
-dep add <a> <b>          让 a 依赖 b（b 必须已存在）
+set <name> cwd <path>    修改工作目录（传空字符串 = 清除）
+set <name> output <p>    修改输出捕获文件（传空字符串 = 清除）
+set <name> type <t>      system | application（传空字符串 = 恢复缺省系统类）
+dep add <a> <b>          让 a 依赖 b（b 必须已存在；系统类依赖用户类会被排序拒绝）
 dep del <a> <b>          删除该依赖
 help                     子命令帮助
 version                  打印发布版本号（POSIX 还有等价的 -V 选项）
-app ...                  控制运行中的应用（IPC，见下节；不改配置文件）
+app ...                  控制运行中的应用（IPC，见下节；自动跨系统侧/用户侧两个 supervisor）
 ```
 
 > `gui`（仅 POSIX 且构建时带 GTK）：强制打开图形配置窗口，不在共享 `cli.c` 子命令表内。
@@ -172,23 +226,29 @@ POSIX（选项须在子命令**之前**，getopt 标准行为）：
 
 ## 进程模型与控制接口（IPC）
 
-项目内的进程分三类：
+项目内的进程分四类：
 
 | 类别 | 角色 | 生命周期 |
 |---|---|---|
-| **服务进程** | 开机启动的主服务（Win32 服务 `service`，或两版通用的 `serve` 前台 supervisor） | 常驻，持有配置模型与已启动应用的进程句柄/PID |
-| **子应用进程** | 服务进程按依赖序启动的用户程序 | 由服务进程跟踪，可被停止/重启 |
-| **用户进程** | 登录之后在控制台/窗口里执行的程序（CLI `app` 子命令等） | 一次性：连接服务进程 → 发一条命令 → 打印应答后退出 |
+| **服务进程** | 开机启动的系统侧主服务（Win32 服务 `service`，或两版通用的 `serve` 前台 supervisor）；只负责系统类 | 常驻，持有配置模型与已启动应用的进程句柄/PID |
+| **用户侧 supervisor** | 登录时启动（Win32 Run 项 / XDG autostart，`user` 入口）；等待系统侧完成后，只负责用户类 | 常驻，同上；端点独立 |
+| **子应用进程** | 两个 supervisor 按依赖序启动的用户程序 | 由启动它的 supervisor 跟踪，可被停止/重启 |
+| **用户进程** | 登录之后在控制台/窗口里执行的程序（CLI `app` 子命令等） | 一次性：连接 supervisor → 发命令 → 打印应答后退出 |
 
 服务进程为用户进程提供对子应用进程的四类接口：**启动（start）、中止（stop）、
 重启（restart）、状态（status）**（外加 list/ping/shutdown）。
 
 ### 传输与端点
 
-- Win32：命名管道 `\\.\pipe\AppBootLauncher`；
-- POSIX：AF_UNIX 流式套接字 `/tmp/bootlauncher.ctl`；
+- Win32：命名管道 `\\.\pipe\AppBootLauncher`（系统侧）与
+  `\\.\pipe\AppBootLauncherUser`（用户侧）；
+- POSIX：AF_UNIX 流式套接字 `/tmp/bootlauncher.ctl`（系统侧）与
+  `/tmp/bootlauncher-user.ctl`（用户侧）；
 - 覆盖方式：`-s <endpoint>` 选项或环境变量 `BOOTLAUNCHER_CTL`（服务侧与客户侧一致；
   服务进程启动日志会打印它监听的端点）。
+- CLI `app` 与 Win32 GUI 的进程控制区**同时面向两个端点**：无名字的 list/status 合并
+  两端应答；带名字的操作先系统端、失败再用户端；shutdown 两端都发。显式 `-s`/
+  `BOOTLAUNCHER_CTL` 时只访问指定端点（调试用）。
 
 ### 协议（两平台一致，文本行，一次连接一条命令）
 
@@ -202,6 +262,10 @@ STOP <name>                   OK stopped ... / ERR not running
 RESTART <name>                  OK restarted ...
 QUIT                          OK bye（服务进程随即退出）
 ```
+
+对**不属于本侧类别**的名字，四个 supervisor 侧动词返回
+`ERR '<name>' is a application-class app; ask the user supervisor`（或反过来），
+CLI/GUI 会自动改问另一侧；`-s` 显式指定单一端点时该 ERR 直接呈现给用户。
 
 共享实现在 `src/ipc.[ch]`（语法解析与客户端调用）+ `src/ipc_win32.c` /
 `src/ipc_posix.c`（管道 / unix 套接字传输）。
@@ -293,9 +357,12 @@ Makefile 会自动加 `-DHAVE_GUI` 编译 `gui_gtk.c` 并链接 GTK（其 includ
 ```bat
 win32\build\release\startup-gcc.exe                  :: 无参数：打开 GUI 配置/状态窗口
 win32\build\release\startup-gcc.exe service          :: 服务入口（SCM 用；install 时自动写入 binPath）
-win32\build\release\startup-gcc.exe serve            :: 前台 supervisor（不注册服务，也有控制接口）
-win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动启动，需管理员）
-win32\build\release\startup-gcc.exe start | stop | uninstall
+win32\build\release\startup-gcc.exe serve            :: 前台 supervisor（系统类；不注册服务，也有控制接口）
+win32\build\release\startup-gcc.exe user             :: 用户侧 supervisor（只启动 application 类；先等系统侧完成；隐藏自身控制台）
+win32\build\release\startup-gcc.exe install          :: 创建服务 AppBootLauncher（自动-延迟启动：所有自启动服务完成后、登录前拉起；非管理员自动 UAC 提权）
+win32\build\release\startup-gcc.exe install-user     :: 写当前用户 Run 项 AppBootLauncherUser -> "exe" user（登录即启动用户侧；无需管理员）
+win32\build\release\startup-gcc.exe uninstall-user   :: 删除该 Run 项
+win32\build\release\startup-gcc.exe start | stop | uninstall   :: uninstall 会先停服务并等待其停止再真正删除
 win32\build\release\startup-gcc.exe run | console -c test\order.conf   :: 不装服务，直接在控制台调试
 win32\build\release\startup-gcc.exe help             :: 管理子命令列表（见上文“命令行管理接口”）
 ```
@@ -303,11 +370,16 @@ win32\build\release\startup-gcc.exe help             :: 管理子命令列表（
 GUI 窗口功能（结构化编辑每个参数）：
 
 - 左侧应用列表（新增/删除应用），右侧每个参数一个控件：
-  名称、命令行（**带“浏览...”按钮**）、启动后等待毫秒、**依赖多选列表**（Ctrl/Shift 多选）；
+  名称、**类别下拉（系统服务类/用户应用类）**、命令行（**带“浏览...”按钮**）、
+  启动后等待毫秒、**依赖多选列表**（Ctrl/Shift 多选）；
 - 改名会自动同步其他应用对它的依赖引用；删除应用会清除悬空引用；
 - 保存配置：按列表顺序重新生成规范格式的 `conf\startup.conf`（共享 `cfg_save()`，与 CLI 产出一致）；
 - 校验依赖顺序（打印拓扑序）、按序启动应用；
 - 安装/卸载/启动/停止服务、刷新状态（显示服务安装与否、启动类型、运行状态）；
+  安装/卸载在权限不足时自动触发 UAC 提权（弹窗确认后重试，GUI 无需以管理员运行）；
+- **子应用进程控制区**：列表实时显示运行中服务进程所管理的应用（名称/状态/进程号，
+  通过控制 IPC 的 `STATUS`），右侧按钮对选中行执行 启动应用/停止应用/重启应用/刷新列表；
+  未找到服务进程时列表清空并在状态框提示端点；
 - 核心日志（解析错误、环、启动记录）全部重定向到状态框。
 
 ### 脚本应用与解释器自动前置（两平台）
@@ -342,13 +414,32 @@ POSIX 规则（有执行位的文件本就可直接运行，内核会认它的 s
 无运行时拒绝）。
 
 - 服务注册的 binPath 为 `"<exe>" service`，开机由 SCM 带 `service` 参数拉起。
+- **开机启动被刻意推迟**：install 会把服务设为“自动(延迟启动)”
+  （`ChangeServiceConfig2` + `SERVICE_CONFIG_DELAYED_AUTO_START_INFO`）。SCM 先完成全部
+  普通自启动服务的启动，**开机流程收尾时才拉起本服务**（仍在任何用户登录之前），不与
+  其他服务争抢启动资源；手动 `start` / GUI“启动服务”不受影响，随时可用。
 - `service`/`serve` 都以 supervisor 模式常驻：启动全部应用后保留其句柄，并在命名管道
   `\\.\pipe\AppBootLauncher` 上提供 `app start|stop|restart|status` 控制接口
   （见“进程模型与控制接口”）；`net stop` 只结束服务进程，应用留在系统里。
+  该管道带显式 DACL（创建者/管理员/系统全权，**交互用户读写**），因此普通用户会话的
+  CLI/GUI 能直接控制以 LocalSystem 运行的服务。
 - 服务默认读取 **`<exe 目录>\..\conf\startup.conf`**（`-c` 可覆盖）。
-- 服务以 LocalSystem 运行，启动的应用无交互桌面。
-- 也可用系统命令注册：`sc create AppBootLauncher binPath= "\"D:\...\bin\startup-gcc.exe\" service" start= auto`。
-- 完整生命周期可用 `win32\test\svc_lifecycle.cmd`（以管理员运行）一键验证。
+- 服务以 LocalSystem 运行（session 0），但启动应用时通过 `WTSGetActiveConsoleSessionId`
+  + `WTSQueryUserToken` + `CreateProcessAsUserA` 落入**当前登录用户的桌面会话**——
+  应用的环境块用 `CreateEnvironmentBlock(用户令牌)` 构建（`USERPROFILE`/`APPDATA` 等
+  指向该用户；若沿用服务的 LocalSystem 环境块，依赖这些目录的应用会在启动瞬间死亡且
+  无任何输出）；控制台应用无窗口（`CREATE_NO_WINDOW`），GUI 应用正常出现在用户桌面；
+  无活动用户会话时回退普通 `CreateProcess`（POSIX 侧 `serve` 不涉及）。
+- **服务日志自动写入 `<exe 目录>\..\logs\startup.log`**（启动时创建目录；设置环境变量
+  `BOOTLAUNCHER_LOG=<路径>` 可改用任意文件）。日志同时仍输出到 stderr。
+- `install`/`uninstall` 权限不足时自动重新以管理员身份运行自身（UAC 弹窗确认；环境变量
+  `STARTUP_ELEV` 标记防止递归提权；用户取消弹窗则报 -1223）。`uninstall` 先向运行中的
+  服务发停止请求并**等待其真正停止**（最长 10 秒）再 `DeleteService`，避免“只标记删除、
+  服务仍在列表”的假象。
+- 也可用系统命令注册：`sc create AppBootLauncher binPath= "\"D:\...\bin\startup-gcc.exe\" service" start= auto` 然后
+  `sc config AppBootLauncher start= delayed-auto`（延迟启动）。
+- 完整生命周期可用 `win32\test\svc_lifecycle.cmd` 一键验证（管理员直接跑；非管理员则
+  install/uninstall 自动走 UAC 提权路径），含“卸载后 `sc query` 必须 1060（彻底消失）”断言。
 - 编码说明：`win32\win32_gui.c` 与 `win32\conf\startup.conf` 保存为 **GBK（代码页 936）**，
   在中文系统上 VC6/MinGW 直接编译/读取即可正确显示中文；改成 UTF-8 会导致 GUI 乱码。
   （`.gitattributes` 已将这两个文件标记为 `binary`，git 不会做行尾/编码转换。）
@@ -395,6 +486,21 @@ APPBOOT_GUI_SHOT=/tmp/gui.png ./build/release/startup -c cfg.conf
 - 或 rc.local：`/usr/local/bin/startup -d serve`
 - 一次性开机（不需要控制接口）仍可用：`/usr/local/bin/startup -d`（启动完即退出）
 
+### POSIX 用户类（登录侧）
+
+系统类装好 systemd unit 后，把用户类挂到桌面会话：
+
+```sh
+mkdir -p ~/.config/autostart
+cp posix/contrib/startup-user.desktop ~/.config/autostart/   # 编辑 Exec 路径
+# 或在会话脚本（~/.xinitrc、WM autostart 钩子）里：
+sh posix/contrib/startup-user.sh
+```
+
+`startup -d user` 先等系统端套接字出现（上限 `BOOTLAUNCHER_WAITMAX` 秒，缺省 60，
+0 = 立即），之后只启动/管理 `type = application` 的条目，控制端点
+`/tmp/bootlauncher-user.ctl`。没有系统侧的机器把 WAITMAX 调小即可。
+
 ## 测试
 
 ```sh
@@ -403,16 +509,99 @@ cd posix && sh test/run_posix_tests.sh
 #   wsl -u root bash -c "cd /mnt/d/My/DEV/startup/posix && sh test/run_posix_tests.sh"
 ```
 
-20 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
+30 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
 自定义端点的 `serve`，走 `app ping/status/stop/restart/unknown/shutdown` 全序列，
-并验证服务退出后 `app` 命令 rc=3。
+并验证服务退出后 `app` 命令 rc=3；第 11 节验证脚本解释器自动解析（shebang 直启、
+无执行位补 `/bin/sh`、`.py` 补 python3、未知扩展名拒绝启动）；第 13 节验证启动类别：
+非法 `type` 值报错、`order` 两阶段（系统类全部在前）、系统类依赖用户类被拒绝、
+`user` 入口等待系统端点、两侧 supervisor 各自只列/只控本类别、跨类控制给出明确
+ERR、`set type` 往返与空值清除。
 
-Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop` 控制接口验证）：
-以管理员运行 `win32\test\svc_lifecycle.cmd`；
-`win32\test\ctl.conf` 配 `serve -s \\.\pipe\...` 可做前台控制接口冒烟。
+Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop` 控制接口验证，
+以及“卸载后服务必须从 SCM 彻底消失（`sc query` 返回 1060）”断言）：
+运行 `win32\test\svc_lifecycle.cmd`（管理员直接跑；非管理员时 install/uninstall
+自动走 UAC 提权路径）；
+`win32\test\ctl.conf` 配 `serve -s \\.\pipe\...` 可做前台控制接口冒烟，
+`win32\test\svc.conf` 用于让已安装服务加载 disposable 测试应用（不碰真实应用）。
 
 ## 已通过的验证
 
+- **两类启动（`type = system | application`）**：核心排序改为类别分区两阶段
+  （系统类阶段 → 用户类阶段，阶段内仍按 deps 拓扑、同层按配置文件顺序；跨阶段前向
+  依赖自动满足；系统类依赖用户类报 -4 错误）。新增 `user` 入口（用户侧 supervisor，
+  先等系统侧完成再启动，只启动只控制用户类）、Win32 `install-user/uninstall-user`
+  （HKCU Run 项，无需管理员）、POSIX contrib/startup-user.desktop/.sh 模板；
+  两侧端点分离（`AppBootLauncherUser` / `/tmp/bootlauncher-user.ctl`）；
+  CLI/GUI 控制命令自动跨两端（无名字合并、带名字回退重试）。
+  POSIX 套件新增第 13 节共 8 项断言，全量 **30/30 通过**。
+  Win32 真机（disposable 测试程序，不碰现有应用）：`user` 实例对运行中的服务
+  PONG 就绪后才启动用户类；系统侧实例只启动无类型条目；`app list` 合并显示两个
+  supervisor 的全部条目；`app status/stop/restart <用户类名>` 经系统端自动改问用户端
+  成功（带名字路由修复后无杂散 ERR）；`app shutdown` 两侧各自干净退出。
+- **应用主进程直控（新增 `cwd`/`output` 字段）**：被 `cmd /c … > 日志` 包装的应用，
+  supervisor 监控的是**包装进程**——cmd 对 GUI 子系统程序不加等待、立即退出，导致
+  状态恒为已退出、stop/restart 都控制不到真正的应用（实机现象：“DSH 进程主服务监控
+  不了”）。修复：配置支持 `cwd`（lpCurrentDirectory / chdir）与 `output`
+  （STARTF_USESTDHANDLES / dup2 追加捕获），应用得以**不加包装直接启动**。实测：
+  `app status` 的 pid 即监听端口的应用主进程；`app stop` 后端口立刻释放；
+  `app restart` 后新 pid 重新监听；一次性测试程序两平台验证 `CWD=` 断言与
+  stdout+stderr 落盘；POSIX 套件新增第 12 节（带引号/不带引号路径、CLI
+  set/list/保存重载、空值清除）22/22 全绿。Win32 配置窗口同步增加两个编辑字段。
+- **用户环境块**（真机根因修复）：实机上服务以用户令牌启动的应用“启动即退出、
+  重定向日志为空”——`CreateProcessAsUser` 传 `lpEnvironment=NULL` 时环境块继承的是
+  服务的 **LocalSystem** 环境，`USERPROFILE` 指向 `C:\Windows\System32\config\systemprofile`
+  而用户令牌对其无写权限。修复：`CreateEnvironmentBlock`（userenv.dll，动态加载）按
+  用户令牌生成环境块传入。部署用 `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)` 排队
+  （运行中的服务镜像无法原地覆盖）：下次开机 Session Manager 在服务启动前完成替换。
+- **DSH 网关的无头启动接口**（可直接写进 startup.conf 的条目形式）：安装包自带 dsh CLI
+  可纯 Node 模式运行——`"…\DeepSeek Harness.exe" --expose-internals
+  "…\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js" --profile web`
+  （即官方 `dsh --profile web`：常驻 Web/网关 surface，无窗口；`--port`/`--no-open` 可选；
+  认证 URL 打印到 stdout）。实测：独立端口下启动、无窗口常驻、带 token 的 URL 经
+  `cmd /c … > 日志 2>&1` 包装落盘、HTTP 401（未认证探测的正常应答）、停止干净。
+- **网关 profile 与桌面配置/会话的共享**：DSH 的配置与插件组合按 **profile 隔离**
+  （`$DSH_HOME\profiles\<名称>\`：`package.json` 的 bundles + 用户层 `cordis.patch.yml`），
+  内置 `web` 模板不含桌面 profile 的插件与设置；会话与凭据则在 **home 级共享**
+  （`$DSH_HOME\sessions` 按工作区目录索引）。要点：
+  - 桌面 profile 的核心 bundle 本就是 `dsh-web-app`（桌面 = 同一网关 + Electron 壳），
+    故**把桌面 profile 整目录复制为自定义名**（如 `profiles\gw`，改 package.json 的
+    name）即可让网关继承全部插件、模型 provider、默认模型与 remote-web-ui 配置；
+    `desktop` 名字保留给 Electron，CLI 拒绝直接 boot。
+  - profile 补丁层（含插件的“managed block”）**优先于 CLI 旗标**：实测 `--port` 被
+    补丁里的 webserver 端口覆盖——端口等设置以 profile 为准，别再传 `--port`。
+  - **默认工作区 = 启动进程的工作目录**，这决定会话列表初始看到哪个工作区的记录；
+    服务启动的应用 cwd 是系统目录，需在 cmd 包装里先 `cd /d <工作区>`（无空格路径可
+    不加引号；`cmd /c cd /d D:\x&& "exe" …` 为可安全解析的标准形式）。
+  - 桌面与网关同时开会争抢同一 webserver 端口（择一运行）；桌面端改了设置后可再
+    `copy profiles\desktop\cordis.patch.yml profiles\gw\` 同步，或直接在网关界面里改
+    （写回 gw 自己的补丁层）。实测：`--profile gw` 完整启动全部 7 个 bundle，
+    打印带 token 的认证 URL，LAN 暴露，root 页 HTTP 200。
+- **开机启动次序**：install 自动把服务设为“自动(延迟启动)”——SCM 完成全部普通自启动
+  服务后才拉起本服务（属开机流程，先于任何用户登录；手动 start 不受影响）。实测
+  install 后 `QueryServiceConfig2` 回读 `fDelayedAutostart=TRUE`，日志打印确认；
+  随后 uninstall 仍 1060 彻底删除。注意：延迟信息不显示在 `sc qc` 的 START_TYPE 里
+  （仍标 AUTO_START），在 services.msc 中显示为“自动(延迟启动)”。
+- Win32 服务三问题修复 + GUI 进程控制（本机实测）：
+  - **卸载**：对运行中的服务 `uninstall` 先 ControlService(STOP) 并轮询等待 STOPPED
+    再 DeleteService；非管理员下自动 UAC 提权。实测真实机器上的运行服务：非管理员
+    `uninstall` → `sc query` 返回 1060（彻底删除），随后 `install` 亦经 UAC 成功注册。
+    `svc_lifecycle.cmd` 新增 GONE-OK（1060）断言，管理员模式一次通过。
+  - **纯 GUI 应用**：服务经 `WTSGetActiveConsoleSessionId`+`WTSQueryUserToken`+
+    `CreateProcessAsUserA` 把应用创建到当前用户会话；实测服务（session 0）启动的
+    测试应用 owner=当前用户、session=1。`wtsapi32.dll` 运行时动态加载，VC6 无头文件/
+    导入库依赖。同时修复控制管道的两处：`CreateNamedPipe` 的 SD 必须以
+    `SECURITY_ATTRIBUTES` 包装（裸描述符会被静默忽略——之前普通用户连接报
+    access denied 的根因），显式 DACL 授予交互用户读写；修复后非管理员 CLI/GUI
+    对服务全部控制动词（ping/status/stop/start/restart）实测通过。
+  - **服务日志**：服务进程自动写 `dist\logs\startup.log`（`BOOTLAUNCHER_LOG` 可覆盖）；
+    通过 `putenv`（而非 `SetEnvironmentVariableA`——VC6 CRT 的 `getenv` 看不到后者）注入。
+  - **GUI 子应用进程控制区**：SysListView32（名称/状态/进程号）+ 启动/停止/重启/刷新
+    按钮，走 `STATUS`/`START`/`STOP`/`RESTART` IPC。程序化实测：选中行→点“停止应用”
+    →`app status` 显示 stopped；点“启动应用”→ running 新 pid；点“重启应用”→ 换 pid。
+    截图确认布局完整（窗口调整为 900x830）。
+  - `package_win32.cmd` 不再整目录删除 dist：**现场配置 `dist\conf\startup.conf`
+    永不覆盖**（曾被旧版脚本连带删除导致服务空配置快速退出——已恢复该文件并新增
+    回归断言）；复制失败现在显式报错而非被 `>nul` 吞掉。
 - 命名统一为 **startup**：POSIX 可执行文件 `bootlauncher` → `startup`（Makefile、
   `make install`、unit `contrib/startup.service`、`contrib/S99startup`、测试脚本同步）；
   版本信息中的应用名统一为 `startup`（`version`/`-V`、usage 头行、`PING` 应答
@@ -458,7 +647,8 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 - 发布包布局实测：`dist\bin\*.exe` 从无关 cwd 启动，均正确读取同包 `conf/startup.conf` 并按序启动。
 - Win32 GUI 实测（截图确认）：无参数启动打开窗口；模型载入应用、表单按选中项正确填充（名称/命令行/等待/依赖候选）；程序化点击“校验依赖顺序”→ 状态框打印正确拓扑序；点击“保存配置”→ 生成的文件被核心重新解析且顺序一致（往返闭环）；服务状态查询显示“未安装”。
 - `service` 参数在非 SCM 环境正确拒绝并提示用 `console` 调试。
-- 服务 install 在非管理员下正确报 err=5（权限不足）；管理员下的完整生命周期请用 `win32\test\svc_lifecycle.cmd` 验证。
+- 服务 install 在非管理员下正确报 err=5（权限不足；后已改为自动 UAC 提权重试，见上文
+  “三问题修复”记录）；完整生命周期用 `win32\test\svc_lifecycle.cmd` 验证。
 
 ## 已知限制
 
@@ -468,3 +658,12 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 - 控制接口单实例串行处理（同一时刻一个客户端）；模型只在服务进程启动时载入，
   改配置后需重启服务进程生效。
 - 仅 ANSI（A 系）Win32 API；路径含非 ASCII 时建议配置文件与程序目录使用 ASCII 路径。
+- POSIX 的 GTK 配置窗口暂不编辑 `cwd`/`output`/`type` 字段（打开含这些字段的配置再保存，
+  字段经共享模型原样保留，不丢失）；Win32 配置窗口与 CLI 均可编辑。
+- 用户侧就绪判定：Win32 以“服务 RUNNING + 系统端 PONG”为准——服务**已安装但未运行**
+  （手动启动型未开）时用户侧不等待直接启动（没有系统侧可等，属预期）；POSIX 以
+  “系统端套接字文件存在”为准（超时上限 `BOOTLAUNCHER_WAITMAX`）。
+- Win32 `user` 入口由 Run 项拉起时其控制台窗口会短暂出现再被隐藏（GetConsoleWindow +
+  ShowWindow），无闪窗控制（无托盘图标，进程常驻）。多用户快速切换时各用户登录各自
+  触发自己的 Run 项，多个用户侧 supervisor 各自独立（端点同名会冲突，可在 Run 值里
+  加 `-s` 区分）。

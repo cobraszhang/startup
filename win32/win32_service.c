@@ -26,12 +26,12 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
-#include "cfg.h"
-#include "topo.h"
-#include "log.h"
-#include "cli.h"
-#include "version.h"
-#include "ipc.h"
+#include "../src/cfg.h"
+#include "../src/topo.h"
+#include "../src/log.h"
+#include "../src/cli.h"
+#include "../src/version.h"
+#include "../src/ipc.h"
 #include "win32_app.h"
 
 #define CONF_SUBPATH   "..\\conf\\startup.conf"
@@ -185,6 +185,134 @@ typedef DWORD (WINAPI *wts_active_session_fn)(void);
 typedef BOOL (WINAPI *wts_query_user_token_fn)(DWORD, HANDLE *);
 typedef BOOL (WINAPI *create_environment_block_fn)(LPVOID *, HANDLE, BOOL);
 typedef BOOL (WINAPI *destroy_environment_block_fn)(LPVOID);
+typedef HWND (WINAPI *get_console_window_fn)(void);
+
+/* startup class this process supervises: the service entry runs the
+ * system side (KIND_SYSTEM), the 'user' entry the application side.
+ * Set before any model is loaded or endpoint is resolved. */
+static int g_kind = KIND_SYSTEM;
+
+/* the user-side supervisor is launched at login from the HKCU Run
+ * entry; hide its console window so only the tray-less background
+ * process remains */
+static void hide_console(void)
+{
+    union { FARPROC raw; get_console_window_fn fn; } c;
+    HMODULE k = GetModuleHandleA("kernel32.dll");
+    HWND    hwnd;
+
+    if (!k) return;
+    c.raw  = GetProcAddress(k, "GetConsoleWindow");
+    if (!c.fn) return;
+    hwnd = c.fn();
+    if (hwnd) ShowWindow(hwnd, SW_HIDE);
+}
+
+/* User applications must never start before system services: wait
+ * until the system-side service is RUNNING *and* its control interface
+ * answers (that interface opens only after every system-class app has
+ * been launched). A service that is merely installed-but-not-running
+ * (e.g. manual start type) does not block the user side. */
+static void wait_system_ready(void)
+{
+    SC_HANDLE       scm, svc;
+    SERVICE_STATUS  st;
+    const char     *w;
+    DWORD           t0, cap_ms;
+
+    w = getenv("BOOTLAUNCHER_WAITMAX");           /* seconds */
+    cap_ms = (w && *w) ? (DWORD)atoi(w) * 1000u : 120000u;
+
+    scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!scm) {
+        log_msg("user: cannot open the service control manager; "
+                "starting user apps without waiting");
+        return;
+    }
+    svc = OpenServiceA(scm, SERVICE_NAME, SERVICE_QUERY_STATUS);
+    if (!svc) {
+        log_msg("user: no system-side service installed; "
+                "starting user apps directly");
+        CloseServiceHandle(scm);
+        return;
+    }
+    t0 = GetTickCount();
+    for (;;) {
+        if (QueryServiceStatus(svc, &st) &&
+            st.dwCurrentState == SERVICE_RUNNING) {
+            char     ep[512];
+            char     r[64];
+            ipc_conn *c;
+            int      got = -1;
+            ipc_default_endpoint(ep, sizeof(ep), KIND_SYSTEM);
+            c = ipc_client_open(ep);
+            if (c) {
+                got = ipc_client_call(c, "PING", r, sizeof(r));
+                ipc_client_close(c);
+            }
+            if (got > 0 && strncmp(r, "OK", 2) == 0) break; /* ready */
+        } else if (QueryServiceStatus(svc, &st) &&
+                   st.dwCurrentState != SERVICE_START_PENDING &&
+                   st.dwCurrentState != SERVICE_STOP_PENDING) {
+            log_msg("user: system-side service is installed but not "
+                    "running (state=%lu); starting user apps anyway",
+                    (unsigned long)st.dwCurrentState);
+            break;
+        }
+        if (GetTickCount() - t0 > cap_ms) {
+            log_msg("user: WARNING system side not ready after %lu s; "
+                    "starting anyway", (unsigned long)(cap_ms / 1000u));
+            break;
+        }
+        Sleep(1000);
+    }
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+}
+
+/* current-user autostart registration for the user-side supervisor */
+#define RUN_KEY   "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+#define RUN_VALUE "AppBootLauncherUser"
+
+static int runreg_control(const char *what)
+{
+    char   exe[MAX_PATH];
+    char   cmd[MAX_PATH * 2 + 16];
+    HKEY   hk;
+    LONG   ls;   /* VC6 headers predate LSTATUS; the Reg* return type */
+
+    GetModuleFileNameA(NULL, exe, MAX_PATH);
+    ls = RegOpenKeyExA(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE, &hk);
+    if (ls != ERROR_SUCCESS) {
+        log_msg("%s: cannot open HKCU\\%s ls=%lu",
+                what, RUN_KEY, (unsigned long)ls);
+        return 1;
+    }
+    if (strcmp(what, "install-user") == 0) {
+        sprintf(cmd, "\"%s\" user", exe);
+        ls = RegSetValueExA(hk, RUN_VALUE, 0, REG_SZ,
+                            (const BYTE *)cmd, (DWORD)strlen(cmd) + 1);
+        if (ls == ERROR_SUCCESS)
+            log_msg("%s: user autostart registered "
+                    "(HKCU\\%s\\%s -> \"user\")", what, RUN_KEY, RUN_VALUE);
+        else
+            log_msg("%s: RegSetValueEx failed ls=%lu",
+                    what, (unsigned long)ls);
+    } else {
+        ls = RegDeleteValueA(hk, RUN_VALUE);
+        if (ls == ERROR_SUCCESS)
+            log_msg("%s: user autostart entry removed", what);
+        else if (ls == ERROR_FILE_NOT_FOUND)
+            log_msg("%s: no user autostart entry present", what);
+        else
+            log_msg("%s: RegDeleteValue failed ls=%lu",
+                    what, (unsigned long)ls);
+    }
+    RegCloseKey(hk);
+    if (strcmp(what, "uninstall-user") == 0 && ls == ERROR_FILE_NOT_FOUND)
+        return 0;
+    return ls == ERROR_SUCCESS ? 0 : 1;
+}
 
 static int spawn_app(const char *cmdline, const char *cwd,
                      const char *output, PROCESS_INFORMATION *pi)
@@ -234,6 +362,18 @@ static int spawn_app(const char *cmdline, const char *cwd,
             si.hStdError  = hout;
             inherit = TRUE;
         }
+    }
+
+    if (g_kind == KIND_APP) {
+        /* user-side supervisor: this process already runs inside the
+         * user's own session with the user's own environment, so a
+         * plain CreateProcess inherits both correctly - using the
+         * active-console-session token instead could pick the wrong
+         * user under fast user switching */
+        ok = CreateProcessA(NULL, (LPSTR)cmdline, NULL, NULL, inherit,
+                            flags, NULL, cwd, &si, pi);
+        if (hout) CloseHandle(hout);
+        return ok ? 0 : (int)GetLastError();
     }
 
     /* transfer through a union: keeps strict C89 compilers from
@@ -321,10 +461,10 @@ int run_all(const char *confpath)
 {
     app_t *apps = NULL;
     int   *order = NULL;
-    int    n = 0, rc, i;
+    int    n = 0, rc, i, cnt = 0;
 
     if (cfg_load(confpath, &apps, &n) != 0) return 1;
-    rc = topo_sort(apps, n, &order);
+    rc = topo_sort(apps, n, TOPO_ALL, &order, &cnt);
     if (rc != 0) {
         log_msg("startup aborted: dependency ordering failed (code %d)", rc);
         cfg_free(apps, n);
@@ -332,10 +472,10 @@ int run_all(const char *confpath)
     }
 
     log_msg("startup: %d application(s), order:", n);
-    for (i = 0; i < n; i++)
+    for (i = 0; i < cnt; i++)
         log_msg("startup:   %d. %s", i + 1, apps[order[i]].name);
 
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < cnt; i++) {
         const app_t *a = &apps[order[i]];
         launch_app(a);
         if (a->wait_ms > 0) {
@@ -376,7 +516,7 @@ static volatile long g_supquit;
 
 static void ep_ensure(void)
 {
-    if (!g_ep[0]) ipc_default_endpoint(g_ep, sizeof(g_ep));
+    if (!g_ep[0]) ipc_default_endpoint(g_ep, sizeof(g_ep), g_kind);
 }
 
 /* append one formatted line to the reply buffer */
@@ -439,18 +579,19 @@ static int sup_launch(int i)
 static void sup_boot(void)
 {
     int *order = NULL;
-    int  i, rc;
+    int  i, cnt = 0, rc;
 
-    rc = topo_sort(g_sapps, g_sn, &order);
+    rc = topo_sort(g_sapps, g_sn, g_kind, &order, &cnt);
     if (rc != 0) {
         log_msg("startup aborted: dependency ordering failed (code %d)", rc);
         return;
     }
-    log_msg("startup: %d application(s), order:", g_sn);
-    for (i = 0; i < g_sn; i++)
+    log_msg("startup:%s %d application(s), order:",
+            g_kind == KIND_APP ? " (user applications)" : "", cnt);
+    for (i = 0; i < cnt; i++)
         log_msg("startup:   %d. %s", i + 1, g_sapps[order[i]].name);
 
-    for (i = 0; i < g_sn; i++) {
+    for (i = 0; i < cnt; i++) {
         int idx = order[i];
         sup_launch(idx);
         if (g_sapps[idx].wait_ms > 0 && g_stop &&
@@ -479,6 +620,25 @@ static int rt_state(int i)
     return g_srt[i].state;
 }
 
+/* find a name-target for control verbs; an app is only controllable by
+ * the supervisor of its startup class */
+static int sup_find(const char *name, char *out, size_t sz)
+{
+    int idx = cfg_index(g_sapps, g_sn, name);
+    if (idx < 0) {
+        rep(out, sz, "ERR unknown app '%s'\n", name);
+        return -1;
+    }
+    if (app_kind(&g_sapps[idx]) != g_kind) {
+        int want = app_kind(&g_sapps[idx]);
+        rep(out, sz, "ERR '%s' is a %s-class app; ask the %s supervisor\n",
+            name, want == KIND_APP ? "application" : "system",
+            want == KIND_APP ? "user" : "system-side");
+        return -1;
+    }
+    return idx;
+}
+
 static int svc_ops(int op, const char *name, char *out, size_t sz)
 {
     int idx;
@@ -490,16 +650,16 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
         break;
     case IPC_OP_LIST:
         rep(out, sz, "OK configured applications:\n");
-        for (idx = 0; idx < g_sn; idx++)
+        for (idx = 0; idx < g_sn; idx++) {
+            if (app_kind(&g_sapps[idx]) != g_kind) continue;
             rep(out, sz, "  %-20s cmd=%s\n",
                 g_sapps[idx].name, g_sapps[idx].cmd);
+        }
         break;
     case IPC_OP_STATUS:
         if (*name) {
             char st[16];
-            idx = cfg_index(g_sapps, g_sn, name);
-            if (idx < 0) { rep(out, sz, "ERR unknown app '%s'\n", name);
-                           break; }
+            if ((idx = sup_find(name, out, sz)) < 0) break;
             state_name(rt_state(idx), st, sizeof(st));
             rep(out, sz, "OK status %s:\n  %s %s pid=%lu\n",
                 name, g_sapps[idx].name, st,
@@ -508,6 +668,7 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
             rep(out, sz, "OK status:\n");
             for (idx = 0; idx < g_sn; idx++) {
                 char st[16];
+                if (app_kind(&g_sapps[idx]) != g_kind) continue;
                 state_name(rt_state(idx), st, sizeof(st));
                 rep(out, sz, "  %-20s %s pid=%lu\n",
                     g_sapps[idx].name, st,
@@ -516,18 +677,16 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
         }
         break;
     case IPC_OP_START:
-        idx = cfg_index(g_sapps, g_sn, name);
-        if (idx < 0)                    rep(out, sz, "ERR unknown app '%s'\n", name);
-        else if (rt_state(idx) == 1)    rep(out, sz, "ERR '%s' already running (pid=%lu)\n",
-                                            name, (unsigned long)g_srt[idx].pid);
+        if ((idx = sup_find(name, out, sz)) < 0)  break;
+        if (rt_state(idx) == 1)    rep(out, sz, "ERR '%s' already running (pid=%lu)\n",
+                                        name, (unsigned long)g_srt[idx].pid);
         else if (sup_launch(idx) != 0)  rep(out, sz, "ERR launch failed for '%s'\n", name);
         else                            rep(out, sz, "OK started '%s' pid=%lu\n",
                                             name, (unsigned long)g_srt[idx].pid);
         break;
     case IPC_OP_STOP:
-        idx = cfg_index(g_sapps, g_sn, name);
-        if (idx < 0)                 rep(out, sz, "ERR unknown app '%s'\n", name);
-        else if (rt_state(idx) != 1) rep(out, sz, "ERR '%s' not running\n", name);
+        if ((idx = sup_find(name, out, sz)) < 0) break;
+        if (rt_state(idx) != 1) rep(out, sz, "ERR '%s' not running\n", name);
         else {
             TerminateProcess(g_srt[idx].h, 0);
             CloseHandle(g_srt[idx].h);
@@ -539,21 +698,18 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
         }
         break;
     case IPC_OP_RESTART:
-        idx = cfg_index(g_sapps, g_sn, name);
-        if (idx < 0)                rep(out, sz, "ERR unknown app '%s'\n", name);
-        else {
-            if (rt_state(idx) == 1) {
-                TerminateProcess(g_srt[idx].h, 0);
-                CloseHandle(g_srt[idx].h);
-                g_srt[idx].h     = NULL;
-                g_srt[idx].state = 2;
-            }
-            if (sup_launch(idx) != 0)
-                rep(out, sz, "ERR restart failed for '%s'\n", name);
-            else
-                rep(out, sz, "OK restarted '%s' pid=%lu\n",
-                    name, (unsigned long)g_srt[idx].pid);
+        if ((idx = sup_find(name, out, sz)) < 0) break;
+        if (rt_state(idx) == 1) {
+            TerminateProcess(g_srt[idx].h, 0);
+            CloseHandle(g_srt[idx].h);
+            g_srt[idx].h     = NULL;
+            g_srt[idx].state = 2;
         }
+        if (sup_launch(idx) != 0)
+            rep(out, sz, "ERR restart failed for '%s'\n", name);
+        else
+            rep(out, sz, "OK restarted '%s' pid=%lu\n",
+                name, (unsigned long)g_srt[idx].pid);
         break;
     case IPC_OP_QUIT:
         g_supquit = 1;
@@ -952,10 +1108,14 @@ static void usage(const char *prog)
         "  (no command)  open the configuration/status GUI window\n"
         "  service       run as Windows service (SCM entry point)\n"
         "  serve         foreground supervisor with the control IPC\n"
+        "  user          user-side supervisor (application-class only;\n"
+        "                starts after the system side; hides its console)\n"
         "  install       create service '%s' with automatic start\n",
         prog, SERVICE_NAME);
     fprintf(stderr,
         "  uninstall     remove the service\n"
+        "  install-user  add the current-user Run entry for 'user'\n"
+        "  uninstall-user remove that entry\n"
         "  start | stop  control the installed service\n"
         "  run | console run the launcher in this console (debug)\n"
         "  -s NAME       control pipe name for 'app' commands "
@@ -1033,8 +1193,26 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (strcmp(pos[0], "install") == 0)   return svc_control("install", 1);
-    if (strcmp(pos[0], "uninstall") == 0) return svc_control("uninstall", 0);
+    if (strcmp(pos[0], "user") == 0) {
+        /* user-side supervisor: starts only application-class entries,
+         * and only after the system side has finished starting its
+         * own; run it from the HKCU Run entry (see install-user) */
+        setup_service_logging(exe);
+        hide_console();
+        log_msg("user: startup " APPBOOT_VERSION
+                ", configuration file: %s", conf);
+        g_kind = KIND_APP;
+        wait_system_ready();
+        if (sup_load(conf) != 0) return 1;
+        sup_boot();
+        serve_loop();
+        return 0;
+    }
+
+    if (strcmp(pos[0], "install") == 0)     return svc_control("install", 1);
+    if (strcmp(pos[0], "uninstall") == 0)   return svc_control("uninstall", 0);
+    if (strcmp(pos[0], "install-user") == 0)   return runreg_control("install-user");
+    if (strcmp(pos[0], "uninstall-user") == 0) return runreg_control("uninstall-user");
     if (strcmp(pos[0], "start") == 0)     return svc_control("start", 0);
     if (strcmp(pos[0], "stop") == 0)      return svc_control("stop", 0);
     if (strcmp(pos[0], "console") == 0)   pos[0] = (char *)"run";

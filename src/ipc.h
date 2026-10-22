@@ -4,8 +4,10 @@
  * sub-application processes it launched and serves a line-based control
  * interface on a platform IPC endpoint:
  *
- *   Win32  : named pipe  \\.\pipe\AppBootLauncher
- *   POSIX  : AF_UNIX socket /tmp/bootlauncher.ctl
+ *   Win32  : named pipes  \\.\pipe\AppBootLauncher       (system side)
+ *                          \\.\pipe\AppBootLauncherUser  (user side)
+ *   POSIX  : AF_UNIX sockets /tmp/bootlauncher.ctl       (system side)
+ *                           /tmp/bootlauncher-user.ctl   (user side)
  *
  * The endpoint can be overridden with the BOOTLAUNCHER_CTL environment
  * variable or the -s command line option (client and service alike).
@@ -28,8 +30,10 @@
 #define IPC_ENDPOINT_ENV    "BOOTLAUNCHER_CTL"
 #ifdef _WIN32
 #  define IPC_DEFAULT_ENDPOINT "\\\\.\\pipe\\AppBootLauncher"
+#  define IPC_USER_ENDPOINT    "\\\\.\\pipe\\AppBootLauncherUser"
 #else
 #  define IPC_DEFAULT_ENDPOINT "/tmp/bootlauncher.ctl"
+#  define IPC_USER_ENDPOINT    "/tmp/bootlauncher-user.ctl"
 #endif
 
 #define IPC_LINE_MAX 512
@@ -54,8 +58,9 @@ int ipc_dispatch(const char *line, char *out, size_t outsz,
 
 typedef struct ipc_conn ipc_conn;   /* opaque, defined per platform */
 
-/* endpoint from IPC_ENDPOINT_ENV if set, else IPC_DEFAULT_ENDPOINT */
-void ipc_default_endpoint(char *out, size_t outsz);
+/* endpoint from IPC_ENDPOINT_ENV if set, else the platform default for
+ * the given startup class (0 = system side, 1 = user side) */
+void ipc_default_endpoint(char *out, size_t outsz, int kind);
 
 ipc_conn *ipc_client_open(const char *endpoint);   /* NULL when absent */
 /* byte primitives implemented per platform (0 EOF, -1 error) */

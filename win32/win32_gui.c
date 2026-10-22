@@ -21,12 +21,12 @@
 #include <commdlg.h>
 #include <commctrl.h>
 
-#include "cfg.h"
-#include "topo.h"
-#include "log.h"
+#include "../src/cfg.h"
+#include "../src/topo.h"
+#include "../src/log.h"
 #include "win32_app.h"
-#include "ipc.h"
-#include "version.h"
+#include "../src/ipc.h"
+#include "../src/version.h"
 
 #define ID_APPLIST   100
 #define ID_DEPSLIST  101
@@ -52,11 +52,13 @@
 #define ID_APPREFRESH 215
 #define ID_F_CWD      216
 #define ID_F_OUT      217
+#define ID_F_TYPE     218
 
 static HWND  g_list = NULL, g_depslb = NULL, g_stated = NULL;
 static HWND  g_nameed = NULL, g_cmded = NULL, g_waited = NULL;
 static HWND  g_proclv = NULL;
 static HWND  g_cwded = NULL, g_outed = NULL;
+static HWND  g_typecb = NULL;
 static HFONT g_font_fixed = NULL;
 static char  g_confpath[MAX_PATH * 2];
 
@@ -219,6 +221,7 @@ static void fill_form(int i)
         SetWindowTextA(g_waited, "");
         SetWindowTextA(g_cwded, "");
         SetWindowTextA(g_outed, "");
+        SendMessageA(g_typecb, CB_SETCURSEL, 0, 0);
         return;
     }
     SetWindowTextA(g_nameed, g_apps[i].name);
@@ -227,6 +230,8 @@ static void fill_form(int i)
     SetWindowTextA(g_waited, num);
     SetWindowTextA(g_cwded, g_apps[i].cwd ? g_apps[i].cwd : "");
     SetWindowTextA(g_outed, g_apps[i].output ? g_apps[i].output : "");
+    SendMessageA(g_typecb, CB_SETCURSEL,
+                 app_kind(&g_apps[i]) == KIND_APP ? 1 : 0, 0);
 
     /* dependency candidates: every other app */
     for (j = 0; j < g_n; j++) {
@@ -288,6 +293,13 @@ static void apply_form(void)
     cfg_set_field(&g_apps[i], "wait", waitstr);
     cfg_set_field(&g_apps[i], "cwd", cwdstr);
     cfg_set_field(&g_apps[i], "output", outstr);
+    {
+        int want = (int)SendMessageA(g_typecb, CB_GETCURSEL, 0, 0);
+        int cur  = app_kind(&g_apps[i]);
+        if (want != cur || g_apps[i].type)
+            cfg_set_field(&g_apps[i], "type",
+                          want == 1 ? "application" : "system");
+    }
 
     /* dependencies from the multi-select listbox */
     cnt = (int)SendMessageA(g_depslb, LB_GETCOUNT, 0, 0);
@@ -390,7 +402,7 @@ static void check_or_run(int run_after)
     char   tmp[MAX_PATH];
     app_t *apps = NULL;
     int   *order = NULL;
-    int    n = 0, rc, i;
+    int    n = 0, rc, i, cnt = 0;
 
     apply_form();
     if (model_ok() != 0) return;
@@ -410,7 +422,7 @@ static void check_or_run(int run_after)
         DeleteFileA(tmp);
         return;
     }
-    rc = topo_sort(apps, n, &order);
+    rc = topo_sort(apps, n, TOPO_ALL, &order, &cnt);
     if (rc != 0) {
         status_printf("依赖排序失败（代码 %d），详见上方输出", rc);
         cfg_free(apps, n);
@@ -418,7 +430,7 @@ static void check_or_run(int run_after)
         return;
     }
     status_printf("校验通过：%d 个应用，启动顺序：", n);
-    for (i = 0; i < n; i++)
+    for (i = 0; i < cnt; i++)
         status_printf("  %d. %s", i + 1, apps[order[i]].name);
     free(order);
     cfg_free(apps, n);
@@ -497,26 +509,14 @@ static void lv_setup(HWND p, HFONT f)
 }
 
 /* parse "  name state pid=NNN" reply lines of the STATUS verb */
-static void refresh_proclist(void)
+/* add each "  name state pid=N" line of a STATUS reply to the list */
+static void proclist_parse(char *reply, int *rowp)
 {
-    char      ep[512], reply[8192];
-    char      name[128], state[64], pidv[64];
-    LVITEMA   it;
-    ipc_conn *c;
-    char     *p, *nl;
-    int       row = 0, n;
+    char    name[128], state[64], pidv[64];
+    LVITEMA it;
+    char   *p, *nl;
+    int     row = *rowp;
 
-    if (!g_proclv) return;
-    SendMessageA(g_proclv, LVM_DELETEALLITEMS, 0, 0);
-    ipc_default_endpoint(ep, sizeof(ep));
-    c = ipc_client_open(ep);
-    if (!c) {
-        log_msg("进程列表：未找到服务进程（端点 %s）——需服务或 supervisor 在运行", ep);
-        return;
-    }
-    n = ipc_client_call(c, "STATUS", reply, sizeof(reply));
-    ipc_client_close(c);
-    if (n < 0) { log_msg("进程列表：服务进程无应答"); return; }
     p = reply;
     while (p && *p) {
         nl = strchr(p, 10);
@@ -538,7 +538,35 @@ static void refresh_proclist(void)
         }
         p = nl ? nl + 1 : (char *)0;
     }
+    *rowp = row;
 }
+
+/* the two supervisors answer separately: query the system-side
+ * endpoint first, then the user-side one, and merge the rows */
+static void refresh_proclist(void)
+{
+    char      ep[512], reply[8192];
+    ipc_conn *c;
+    int       kind, row = 0, n;
+
+    if (!g_proclv) return;
+    SendMessageA(g_proclv, LVM_DELETEALLITEMS, 0, 0);
+    for (kind = KIND_SYSTEM; kind <= KIND_APP; kind++) {
+        ipc_default_endpoint(ep, sizeof(ep), kind);
+        c = ipc_client_open(ep);
+        if (!c) {
+            if (kind == KIND_SYSTEM)
+                log_msg("进程列表：未找到服务进程（端点 %s）——需服务或 supervisor 在运行", ep);
+            continue;
+        }
+        n = ipc_client_call(c, "STATUS", reply, sizeof(reply));
+        ipc_client_close(c);
+        if (n < 0) continue;
+        proclist_parse(reply, &row);
+    }
+}
+
+/* write the current form back into model entry g_sel */
 
 static int proc_selected_name(char *name, size_t sz)
 {
@@ -560,24 +588,31 @@ static void app_cmd(const char *verb)
     char      name[128];
     ipc_conn *c;
     char     *nl;
+    int       kind, ok = 0;
 
     if (!g_proclv) return;
     if (!proc_selected_name(name, sizeof(name))) return;
-    ipc_default_endpoint(ep, sizeof(ep));
-    c = ipc_client_open(ep);
-    if (!c) { log_msg("控制：未找到服务进程（端点 %s）", ep); return; }
+    reply[0] = '\0';
     sprintf(req, "%s %s", verb, name);
-    if (ipc_client_call(c, req, reply, sizeof(reply)) < 0) {
-        log_msg("控制：服务进程无应答");
-    } else {
-        nl = strchr(reply, 10);
-        if (nl) *nl = 0;
-        log_msg("控制应答：%s", reply);
+    for (kind = KIND_SYSTEM; kind <= KIND_APP; kind++) {
+        ipc_default_endpoint(ep, sizeof(ep), kind);
+        c = ipc_client_open(ep);
+        if (!c) continue;
+        if (ipc_client_call(c, req, reply, sizeof(reply)) >= 0 &&
+            strncmp(reply, "OK", 2) == 0) {
+            ipc_client_close(c);
+            ok = 1;
+            break;
+        }
+        ipc_client_close(c);
     }
-    ipc_client_close(c);
+    nl = strchr(reply, 10);
+    if (nl) *nl = 0;
+    if (ok) log_msg("控制应答：%s", reply);
+    else    log_msg("控制失败：%s",
+                    reply[0] ? reply : "(两个控制端均未成功应答)");
     refresh_proclist();
 }
-
 /* file picker for the command line field: the configuration keeps
  * only the quoted file path; the interpreter (if any) is prepended
  * later, at execution time (app_build_cmdline). */
@@ -642,9 +677,21 @@ static void on_create(HWND h)
 
     /* right: per-parameter form */
     mk_label(h, "名称：", 225, 30, 120, fui);
-    g_nameed = mk_edit(h, ID_F_NAME, 225, 48, 280, 24, 0, fui);
-    mk_label(h, "启动后等待（毫秒）：", 525, 30, 200, fui);
-    g_waited = mk_edit(h, ID_F_WAIT, 525, 48, 100, 24, 0, fui);
+    g_nameed = mk_edit(h, ID_F_NAME, 225, 48, 240, 24, 0, fui);
+    mk_label(h, "类别：", 480, 30, 100, fui);
+    g_typecb = CreateWindowExA(0, "COMBOBOX", "",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        480, 48, 170, 140, h, (HMENU)(LONG_PTR)ID_F_TYPE,
+        GetModuleHandleA(NULL), NULL);
+    if (g_typecb) {
+        SendMessageA(g_typecb, WM_SETFONT, (WPARAM)fui, TRUE);
+        SendMessageA(g_typecb, CB_ADDSTRING, 0,
+                     (LPARAM)"系统服务类 (system)");
+        SendMessageA(g_typecb, CB_ADDSTRING, 0,
+                     (LPARAM)"用户应用类 (application)");
+    }
+    mk_label(h, "启动后等待（毫秒）：", 660, 30, 200, fui);
+    g_waited = mk_edit(h, ID_F_WAIT, 660, 48, 100, 24, 0, fui);
     mk_label(h, "命令行：", 225, 84, 200, fui);
     g_cmded = mk_edit(h, ID_F_CMD, 225, 102, 572, 24, 0, g_font_fixed);
     mk_button(h, "浏览...", ID_BROWSE, 802, 101, 72, fui);

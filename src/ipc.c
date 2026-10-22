@@ -82,10 +82,12 @@ int ipc_dispatch(const char *line, char *out, size_t outsz,
 
 /* ---------------- generic client over the byte primitives ----------- */
 
-void ipc_default_endpoint(char *out, size_t outsz)
+void ipc_default_endpoint(char *out, size_t outsz, int kind)
 {
     const char *e = getenv(IPC_ENDPOINT_ENV);
-    strncpy(out, (e && *e) ? e : IPC_DEFAULT_ENDPOINT, outsz - 1);
+    const char *d = (kind == 1 /* KIND_APP */) ? IPC_USER_ENDPOINT
+                                               : IPC_DEFAULT_ENDPOINT;
+    strncpy(out, (e && *e) ? e : d, outsz - 1);
     out[outsz - 1] = '\0';
 }
 

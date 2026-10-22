@@ -7,8 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "ipc.h"
-#include "log.h"
+#include "../src/ipc.h"
+#include "../src/log.h"
 
 struct ipc_conn { HANDLE h; };
 

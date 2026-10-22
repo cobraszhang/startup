@@ -66,7 +66,11 @@ static void usage(const char *prog)
         "  -V       print version and exit\n"
         "  (no subcommand) opens the configuration GUI when a graphical\n"
         "  session is detected; otherwise boots the applications\n"
-        "  serve     boot + stay resident as the control server\n");
+        "  serve     boot + stay resident as the system-side control server\n"
+        "  user      stay resident as the USER-side control server:\n"
+        "            waits until the system side finished, then starts\n"
+        "            only application-class entries (run this from the\n"
+        "            desktop session autostart, with -d or '&')\n");
     cli_usage(prog);
     fprintf(stderr, "  gui                      force opening the GUI\n");
 }
@@ -341,10 +345,10 @@ int run_all(const char *confpath)
 {
     app_t *apps = NULL;
     int   *order = NULL;
-    int    n = 0, rc, i;
+    int    n = 0, rc, i, cnt = 0;
 
     if (cfg_load(confpath, &apps, &n) != 0) return 1;
-    rc = topo_sort(apps, n, &order);
+    rc = topo_sort(apps, n, TOPO_ALL, &order, &cnt);
     if (rc != 0) {
         log_msg("startup aborted: dependency ordering failed (code %d)", rc);
         cfg_free(apps, n);
@@ -352,10 +356,10 @@ int run_all(const char *confpath)
     }
 
     log_msg("startup: %d application(s), order:", n);
-    for (i = 0; i < n; i++)
+    for (i = 0; i < cnt; i++)
         log_msg("startup:   %d. %s", i + 1, apps[order[i]].name);
 
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < cnt; i++) {
         const app_t *a = &apps[order[i]];
         launch_app(a);
         if (a->wait_ms > 0)
@@ -388,6 +392,7 @@ static int     g_sn;
 static rt_t   *g_srt;
 static char    g_ep[512];
 static volatile sig_atomic_t g_quit;
+static int     g_kind = KIND_SYSTEM;   /* class this process supervises */
 
 static void term_handler(int sig)
 {
@@ -455,18 +460,19 @@ static int sup_launch(int i)
 static void sup_boot(void)
 {
     int *order = NULL;
-    int  i, rc;
+    int  i, rc, cnt = 0;
 
-    rc = topo_sort(g_sapps, g_sn, &order);
+    rc = topo_sort(g_sapps, g_sn, g_kind, &order, &cnt);
     if (rc != 0) {
         log_msg("startup aborted: dependency ordering failed (code %d)", rc);
         return;
     }
-    log_msg("startup: %d application(s), order:", g_sn);
-    for (i = 0; i < g_sn; i++)
+    log_msg("startup:%s %d application(s), order:",
+            g_kind == KIND_APP ? " (user applications)" : "", cnt);
+    for (i = 0; i < cnt; i++)
         log_msg("startup:   %d. %s", i + 1, g_sapps[order[i]].name);
 
-    for (i = 0; i < g_sn && !g_quit; i++) {
+    for (i = 0; i < cnt && !g_quit; i++) {
         sup_launch(order[i]);
         if (g_sapps[order[i]].wait_ms > 0)
             sleep_ms((unsigned)g_sapps[order[i]].wait_ms);
@@ -511,6 +517,25 @@ static void sup_stop(int i)
     g_srt[i].state = 2;
 }
 
+/* find a name-target for control verbs; an app is only controllable by
+ * the supervisor of its startup class */
+static int sup_find(const char *name, char *out, size_t sz)
+{
+    int idx = cfg_index(g_sapps, g_sn, name);
+    if (idx < 0) {
+        rep(out, sz, "ERR unknown app '%s'\n", name);
+        return -1;
+    }
+    if (app_kind(&g_sapps[idx]) != g_kind) {
+        int want = app_kind(&g_sapps[idx]);
+        rep(out, sz, "ERR '%s' is a %s-class app; ask the %s supervisor\n",
+            name, want == KIND_APP ? "application" : "system",
+            want == KIND_APP ? "user" : "system-side");
+        return -1;
+    }
+    return idx;
+}
+
 static int svc_ops(int op, const char *name, char *out, size_t sz)
 {
     int idx;
@@ -522,16 +547,16 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
         break;
     case IPC_OP_LIST:
         rep(out, sz, "OK configured applications:\n");
-        for (idx = 0; idx < g_sn; idx++)
+        for (idx = 0; idx < g_sn; idx++) {
+            if (app_kind(&g_sapps[idx]) != g_kind) continue;
             rep(out, sz, "  %-20s cmd=%s\n",
                 g_sapps[idx].name, g_sapps[idx].cmd);
+        }
         break;
     case IPC_OP_STATUS:
         if (*name) {
             char st[16];
-            idx = cfg_index(g_sapps, g_sn, name);
-            if (idx < 0) { rep(out, sz, "ERR unknown app '%s'\n", name);
-                           break; }
+            if ((idx = sup_find(name, out, sz)) < 0) break;
             state_name(rt_state(idx), st, sizeof(st));
             rep(out, sz, "OK status %s:\n  %s %s pid=%ld\n",
                 name, g_sapps[idx].name, st, (long)g_srt[idx].pid);
@@ -539,6 +564,7 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
             rep(out, sz, "OK status:\n");
             for (idx = 0; idx < g_sn; idx++) {
                 char st[16];
+                if (app_kind(&g_sapps[idx]) != g_kind) continue;
                 state_name(rt_state(idx), st, sizeof(st));
                 rep(out, sz, "  %-20s %s pid=%ld\n",
                     g_sapps[idx].name, st, (long)g_srt[idx].pid);
@@ -546,18 +572,16 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
         }
         break;
     case IPC_OP_START:
-        idx = cfg_index(g_sapps, g_sn, name);
-        if (idx < 0)                   rep(out, sz, "ERR unknown app '%s'\n", name);
-        else if (rt_state(idx) == 1)   rep(out, sz, "ERR '%s' already running (pid=%ld)\n",
-                                            name, (long)g_srt[idx].pid);
+        if ((idx = sup_find(name, out, sz)) < 0)  break;
+        if (rt_state(idx) == 1)   rep(out, sz, "ERR '%s' already running (pid=%ld)\n",
+                                        name, (long)g_srt[idx].pid);
         else if (sup_launch(idx) != 0) rep(out, sz, "ERR launch failed for '%s'\n", name);
         else                           rep(out, sz, "OK started '%s' pid=%ld\n",
                                             name, (long)g_srt[idx].pid);
         break;
     case IPC_OP_STOP:
-        idx = cfg_index(g_sapps, g_sn, name);
-        if (idx < 0)                 rep(out, sz, "ERR unknown app '%s'\n", name);
-        else if (rt_state(idx) != 1) rep(out, sz, "ERR '%s' not running\n", name);
+        if ((idx = sup_find(name, out, sz)) < 0) break;
+        if (rt_state(idx) != 1) rep(out, sz, "ERR '%s' not running\n", name);
         else {
             sup_stop(idx);
             log_msg("sup: stopped '%s' pid=%ld", g_sapps[idx].name,
@@ -566,16 +590,13 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
         }
         break;
     case IPC_OP_RESTART:
-        idx = cfg_index(g_sapps, g_sn, name);
-        if (idx < 0)              rep(out, sz, "ERR unknown app '%s'\n", name);
-        else {
-            if (rt_state(idx) == 1) sup_stop(idx);
-            if (sup_launch(idx) != 0)
-                rep(out, sz, "ERR restart failed for '%s'\n", name);
-            else
-                rep(out, sz, "OK restarted '%s' pid=%ld\n",
-                    name, (long)g_srt[idx].pid);
-        }
+        if ((idx = sup_find(name, out, sz)) < 0) break;
+        if (rt_state(idx) == 1) sup_stop(idx);
+        if (sup_launch(idx) != 0)
+            rep(out, sz, "ERR restart failed for '%s'\n", name);
+        else
+            rep(out, sz, "OK restarted '%s' pid=%ld\n",
+                name, (long)g_srt[idx].pid);
         break;
     case IPC_OP_QUIT:
         g_quit = 1;
@@ -588,12 +609,37 @@ static int svc_ops(int op, const char *name, char *out, size_t sz)
     return op;
 }
 
+/* User applications must never start before system services: wait
+ * until the system-side supervisor's control endpoint exists - that
+ * socket appears only once every system-class app has been launched.
+ * BOOTLAUNCHER_WAITMAX overrides the bound in seconds (0 = no wait);
+ * on timeout we proceed with a warning (the system side may simply
+ * not be installed on this machine). */
+static void wait_system_ready(void)
+{
+    char         ep[512];
+    const char  *w;
+    int          cap_s, waited_ms;
+
+    w = getenv("BOOTLAUNCHER_WAITMAX");
+    cap_s = (w && *w) ? atoi(w) : 60;
+    ipc_default_endpoint(ep, sizeof(ep), KIND_SYSTEM);
+    for (waited_ms = 0; waited_ms <= cap_s * 1000; waited_ms += 500) {
+        struct stat sb;
+        if (g_quit) return;
+        if (stat(ep, &sb) == 0) return;   /* system side is up */
+        sleep_ms(500);
+    }
+    log_msg("user: WARNING no system-side control endpoint at %s after "
+            "%d s; starting anyway", ep, cap_s);
+}
+
 static void serve_loop(void)
 {
     void *srv;
     char  line[IPC_LINE_MAX], out[8192];
 
-    if (!g_ep[0]) ipc_default_endpoint(g_ep, sizeof(g_ep));
+    if (!g_ep[0]) ipc_default_endpoint(g_ep, sizeof(g_ep), g_kind);
     signal(SIGTERM, term_handler);
     signal(SIGINT,  term_handler);
 
@@ -690,11 +736,27 @@ int main(int argc, char **argv)
             return gui_main(chosen, run_all);
 #endif
         if (strcmp(sub[0], "serve") == 0) {
-            /* resident supervisor: boot everything, then keep serving
-             * the control interface (used by systemd / SysV / desktop) */
+            /* resident system-side supervisor: boots the system-class
+             * entries, then keeps serving the control interface
+             * (used by systemd / SysV / desktop) */
             if (daemon_mode) daemonize();
             log_msg("startup supervisor " APPBOOT_VERSION
                     ": configuration file: %s", chosen);
+            if (sup_load(chosen) != 0) return 1;
+            sup_boot();
+            serve_loop();
+            return 0;
+        }
+        if (strcmp(sub[0], "user") == 0) {
+            /* resident user-side supervisor: waits until the system
+             * side has finished starting its apps, then starts and
+             * supervises application-class entries only; run it from
+             * the desktop session's autostart (see contrib/) */
+            if (daemon_mode) daemonize();
+            g_kind = KIND_APP;
+            log_msg("startup user supervisor " APPBOOT_VERSION
+                    ": configuration file: %s", chosen);
+            wait_system_ready();
             if (sup_load(chosen) != 0) return 1;
             sup_boot();
             serve_loop();

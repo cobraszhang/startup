@@ -1,4 +1,6 @@
-# systemd unit for the POSIX launcher:
+# systemd unit for the POSIX launcher (SYSTEM side: starts entries
+# without a type, or type = system; see contrib/startup-user.desktop
+# for the application-class side):
 #   cp contrib/startup.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable startup.service
 [Unit]

@@ -30,7 +30,65 @@ void cli_set_endpoint(const char *endpoint)
     g_endpoint[sizeof(g_endpoint) - 1] = '\0';
 }
 
-/* 'app' subcommands: forwarded to the running service process */
+/* 'app' subcommands: forwarded to the running supervisor(s).
+ * Both the system-side and the user-side supervisor answer; LIST and
+ * STATUS merge their replies, name-targeted verbs are retried against
+ * the other side when the first answer is an error, and QUIT stops both. */
+static int ipc_one(const char *ep, const char *req, char *reply, size_t rsz)
+{
+    ipc_conn *c;
+    int       got;
+
+    c = ipc_client_open(ep);
+    if (!c) return 3;                       /* endpoint not present */
+    got = ipc_client_call(c, req, reply, rsz);
+    ipc_client_close(c);
+    if (got < 0) return 1;                  /* transport error */
+    return strncmp(reply, "OK", 2) == 0 ? 0 : 1;
+}
+
+static void ep_for(char *out, size_t sz, int kind)
+{
+    size_t n;
+
+    if (!g_endpoint[0]) {
+        ipc_default_endpoint(out, sz, kind);
+        return;
+    }
+    n = strlen(g_endpoint);
+    if (n > sz - 1) n = sz - 1;
+    memcpy(out, g_endpoint, n);
+    out[n] = '\0';
+}
+
+static int build_req(char *req, size_t rsz, const char *verb,
+                     const char *name)
+{
+    size_t n = strlen(verb);
+    if (n + 1 >= rsz) return -1;
+    memcpy(req, verb, n);
+    req[n] = '\0';
+    if (*name) {
+        req[n++] = ' ';
+        strncpy(req + n, name, rsz - n - 1);
+        req[rsz - 1] = '\0';
+    }
+    return 0;
+}
+
+/* print reply, optionally dropping its first "OK <header>" line so a
+ * second supervisor's output continues the same listing */
+static void show_reply(const char *reply, int drop_header)
+{
+    const char *p = reply;
+    if (drop_header) {
+        const char *nl = strchr(reply, '\n');
+        if (!nl) return;
+        p = nl + 1;
+    }
+    fputs(p, stdout);
+}
+
 static int cmd_app(int argc, char **argv)
 {
     static const struct {
@@ -46,11 +104,10 @@ static int cmd_app(int argc, char **argv)
         { "restart",  "RESTART", 1 },
         { "shutdown", "QUIT",    0 }
     };
-    char        ep[512], req[IPC_LINE_MAX], reply[8192];
-    ipc_conn   *c;
+    char        ep[512], req[IPC_LINE_MAX], reply[8192], ep2[512];
     const char *name;
-    size_t      i, n;
-    int         got;
+    size_t      i;
+    int         rc;
 
     if (argc < 2) {
         fprintf(stderr, "usage: app ping|list [name]|start|stop|restart"
@@ -65,42 +122,63 @@ static int cmd_app(int argc, char **argv)
     }
     name = (argc >= 3) ? argv[2] : "";
     if (tbl[i].named && !*name) {
-        fprintf(stderr, "usage: app %s <name>\n", tbl[i].sc);
+        fprintf(stderr, "usage: app %s <name>\n", argv[1]);
+        return 2;
+    }
+    if (build_req(req, sizeof(req), tbl[i].verb, name) != 0) {
+        fprintf(stderr, "app: request too long\n");
         return 2;
     }
 
-    if (g_endpoint[0]) {
-        strncpy(ep, g_endpoint, sizeof(ep) - 1);
-        ep[sizeof(ep) - 1] = '\0';
-    } else {
-        ipc_default_endpoint(ep, sizeof(ep));
+    /* merged / both-sides verbs: list, status (no name), shutdown;
+     * a named status behaves like the other name-targeted verbs */
+    if (!tbl[i].named && !*name && strcmp(tbl[i].sc, "ping") != 0) {
+        int any = 0, r1, r2;
+        ep_for(ep, sizeof(ep), KIND_SYSTEM);
+        r1 = ipc_one(ep, req, reply, sizeof(reply));
+        if (r1 != 3) {
+            any = 1;
+            show_reply(reply, 0);
+            if (r1 != 0) rc = 1; else rc = 0;
+        } else {
+            rc = 3;
+        }
+        ep_for(ep2, sizeof(ep2), KIND_APP);
+        if (strcmp(ep2, ep) != 0) {
+            r2 = ipc_one(ep2, req, reply, sizeof(reply));
+            if (r2 != 3) {
+                any = 1;
+                show_reply(reply, (r1 != 3));
+                if (r2 != 0 && rc == 0) rc = 1;
+            }
+        }
+        if (!any)
+            log_msg("app: cannot reach the control service at %s "
+                    "(is the service process running?)", ep);
+        return any ? rc : 3;
     }
 
-    c = ipc_client_open(ep);
-    if (!c) {
+    /* ping, or name-targeted verbs: try the system side first, then
+     * the user side (an app is managed by the supervisor of its class) */
+    ep_for(ep, sizeof(ep), KIND_SYSTEM);
+    rc = ipc_one(ep, req, reply, sizeof(reply));
+    if (rc != 0) {
+        ep_for(ep2, sizeof(ep2), KIND_APP);
+        if (strcmp(ep2, ep) != 0) {
+            int r2 = ipc_one(ep2, req, reply, sizeof(reply));
+            if (r2 == 0 || (rc == 3 && r2 != 3)) rc = r2;
+        }
+    }
+    if (rc == 3) {
         log_msg("app: cannot reach the control service at %s "
                 "(is the service process running?)", ep);
         return 3;
     }
-
-    n = strlen(tbl[i].verb);
-    memcpy(req, tbl[i].verb, n);
-    if (*name) {
-        req[n++] = ' ';
-        strncpy(req + n, name, sizeof(req) - n - 2);
-        req[sizeof(req) - 2] = '\0';
-        n = strlen(req);
-    }
-    req[n] = '\0';
-
-    got = ipc_client_call(c, req, reply, sizeof(reply));
-    ipc_client_close(c);
-    if (got < 0) {
-        log_msg("app: control channel error");
-        return 3;
+    if (rc == 1) {
+        fputs(reply, stdout);
+        return 1;
     }
     fputs(reply, stdout);
-    if (strncmp(reply, "OK", 2) != 0) return 1;
     return 0;
 }
 
@@ -126,7 +204,11 @@ void cli_usage(const char *prog)
         "  rm <name>                remove entry and references to it\n"
         "  rename <old> <new>       rename entry (references follow)\n"
         "  set <name> cmd <line>    set command line (args may be unquoted)\n"
-        "  set <name> wait <ms>     set post-start wait in ms\n"
+        "  set <name> wait <ms>     set post-start wait in ms\n");
+    fprintf(stderr,
+        "  set <name> cwd <dir>     set working directory ('' clears)\n"
+        "  set <name> output <f>    capture stdout+stderr ('' clears)\n"
+        "  set <name> type <t>      system | application (startup class)\n"
         "  dep add <a> <b>          make application a depend on b\n"
         "  dep del <a> <b>          remove that dependency\n"
         "  help                     this text\n"
@@ -142,11 +224,12 @@ void cli_usage(const char *prog)
 static int print_order(const app_t *apps, int n)
 {
     int *order = NULL;
-    int  rc = topo_sort(apps, n, &order);
+    int  cnt = 0;
+    int  rc = topo_sort(apps, n, TOPO_ALL, &order, &cnt);
     int  i;
 
     if (rc != 0) return rc;
-    for (i = 0; i < n; i++)
+    for (i = 0; i < cnt; i++)
         printf("%d. %s\n", i + 1, apps[order[i]].name);
     free(order);
     return 0;
@@ -217,6 +300,9 @@ int cli_main(int argc, char **argv, const char *prog,
         for (i = 0; i < n; i++) {
             printf("%s\n", apps[i].name);
             printf("  cmd  = %s\n", apps[i].cmd);
+            printf("  type = %s\n",
+                   app_kind(&apps[i]) == KIND_APP ? "application"
+                                                 : "system");
             if (apps[i].cwd)
                 printf("  cwd  = %s\n", apps[i].cwd);
             if (apps[i].output)
@@ -228,7 +314,8 @@ int cli_main(int argc, char **argv, const char *prog,
         }
     } else if (strcmp(cmd, "check") == 0) {
         int *o = NULL;
-        if (topo_sort(apps, n, &o) != 0) rc = 1;
+        int  cnt = 0;
+        if (topo_sort(apps, n, TOPO_ALL, &o, &cnt) != 0) rc = 1;
         else {
             free(o);
             printf("configuration OK: %d application(s)\n", n);
@@ -273,7 +360,8 @@ int cli_main(int argc, char **argv, const char *prog,
         if (argc < 4) {
             rc = 2;
             fprintf(stderr,
-                "usage: set <name> cmd <line...> | set <name> wait <ms>\n");
+                "usage: set <name> cmd <line...> | set <name>"
+                " wait|cwd|output|type <value>\n");
         } else if ((idx = find_or_error(apps, n, argv[1])) < 0) {
             rc = 1;
         } else if (strcmp(argv[2], "cmd") == 0) {
@@ -289,7 +377,8 @@ int cli_main(int argc, char **argv, const char *prog,
                 free(full);
             }
         } else if (cfg_set_field(&apps[idx], argv[2], argv[3]) != 0) {
-            log_msg("cli: set: key must be cmd or wait with a value");
+            log_msg("cli: set: key must be cmd/wait/cwd/output/type with "
+                    "a valid value (type: system|application)");
             rc = 1;
         } else rc = save_and_report(confpath, apps, n);
     } else if (strcmp(cmd, "dep") == 0) {
