@@ -2,6 +2,14 @@
 win32/build/
 posix/build/
 
+# VC6 IDE 缓存（工程文件 startup.dsp/.dsw 是跟踪的，这些随 IDE 打开重新生成）
+win32/*.ncb
+win32/*.opt
+win32/*.plg
+win32/*.positions
+win32/*.aps
+win32/*.dspdep
+
 # 杂项
 *.log
 *.tmp

@@ -10,6 +10,8 @@ Makefile text eol=lf
 *.conf   text eol=lf
 *.cmd    text eol=crlf
 *.bat    text eol=crlf
+*.dsp    text eol=crlf
+*.dsw    text eol=crlf
 .gitattributes text eol=lf
 .gitignore     text eol=lf
 
