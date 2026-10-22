@@ -660,13 +660,18 @@ static int file_contains(const char *path, const char *needle)
 
 static void exe_absolute(const char *argv0, char *out, size_t outsz)
 {
-    if (realpath(argv0, out)) return;
+    ssize_t n = readlink("/proc/self/exe", out, outsz - 1);
+    if (n > 0) {
+        out[n] = '\0';
+        return;
+    }
     strncpy(out, argv0, outsz - 1);
     out[outsz - 1] = '\0';
 }
 
-/* <XDG_CONFIG_HOME or HOME/.config>/autostart/startup-user.desktop */
-static int autostart_file(char *out, size_t outsz)
+/* <XDG_CONFIG_HOME or HOME/.config> shared base for both user-side
+ * registrations (XDG autostart file, systemd user unit) */
+static int config_home(char *out, size_t outsz)
 {
     const char *xdg  = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
@@ -681,8 +686,27 @@ static int autostart_file(char *out, size_t outsz)
         return -1;
     }
     out[outsz - 1] = '\0';
+    return 0;
+}
+
+static int autostart_file(char *out, size_t outsz)
+{
+    if (config_home(out, outsz) != 0) return -1;
     if (strlen(out) + 40 >= outsz) return -1;
     strcat(out, "/autostart/startup-user.desktop");
+    return 0;
+}
+
+/* With systemd running an XDG autostart file is only consumed by a
+ * desktop session manager - a headless/WSL systemd box has none, so
+ * the user side registers as a systemd USER unit instead (effective
+ * at login, enable-able without root; `loginctl enable-linger` can
+ * start it before any login). */
+static int userunit_file(char *out, size_t outsz)
+{
+    if (config_home(out, outsz) != 0) return -1;
+    if (strlen(out) + 40 >= outsz) return -1;
+    strcat(out, "/systemd/user/startup-user.service");
     return 0;
 }
 
@@ -693,74 +717,149 @@ static void mkdir_ignoring_exists(const char *path)
     }
 }
 
+/* mkdir -p for a path whose parents are user-owned (best effort) */
+static int mkdir_nested(const char *path)
+{
+    char  buf[4096];
+    char *p;
+
+    strncpy(buf, path, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    for (p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
 static int install_user_autostart(const char *exeabs)
 {
     char  file[4096];
     char  dir[4096];
     char *slash;
     FILE *f;
+    int   unit = is_dir("/run/systemd/system");
 
-    if (autostart_file(file, sizeof(file)) != 0) {
+    if (unit) {
+        if (userunit_file(file, sizeof(file)) != 0) {
+            log_msg("install: cannot determine the user unit location "
+                    "(set XDG_CONFIG_HOME or HOME)");
+            return 1;
+        }
+    } else if (autostart_file(file, sizeof(file)) != 0) {
         log_msg("install: cannot determine the autostart location "
                 "(set XDG_CONFIG_HOME or HOME)");
         return 1;
     }
     if (file_exists(file)) {
-        log_msg("install: user autostart entry already present, left "
+        log_msg("install: user-side entry already present, left "
                 "unchanged: %s", file);
         return 0;
     }
     strcpy(dir, file);
     slash = strrchr(dir, '/');
     if (!slash) return 1;
-    *slash = '\0';                      /* .../autostart */
-    {
+    *slash = '\0';
+    if (unit) {
+        if (mkdir_nested(dir) != 0) {
+            log_msg("install: cannot create %s", dir);
+            return 1;
+        }
+    } else {
         char *slash2 = strrchr(dir, '/');
         if (!slash2) return 1;
         *slash2 = '\0';                 /* .../.config */
         mkdir_ignoring_exists(dir);
         *slash2 = '/';
+        mkdir_ignoring_exists(dir);
     }
-    mkdir_ignoring_exists(dir);
     f = fopen(file, "w");
     if (!f) {
         log_msg("install: cannot write %s", file);
         return 1;
     }
-    fprintf(f,
-        "[Desktop Entry]\n"
-        "Type=Application\n"
-        "Name=startup user supervisor\n"
-        "Comment=start application-class entries at logon\n"
-        "Exec=\"%s\" -d user\n"
-        "Terminal=false\n"
-        "X-GNOME-Autostart-enabled=true\n",
-        exeabs);
-    fclose(f);
-    chmod(file, 0755);
-    log_msg("install: user autostart registered: %s -> \"%s\" -d user",
-            file, exeabs);
+    if (unit) {
+        fprintf(f,
+            "[Unit]\n"
+            "Description=startup user supervisor (application-class "
+            "entries at login)\n\n"
+            "[Service]\n"
+            "ExecStart=\"%s\" -d user\n"
+            "Restart=on-failure\n\n"
+            "[Install]\n"
+            "WantedBy=default.target\n",
+            exeabs);
+        fclose(f);
+        if (system("systemctl --user daemon-reload >/dev/null 2>&1") != 0)
+            log_msg("install: NOTE systemctl --user daemon-reload "
+                    "unavailable (no user session bus?)");
+        if (system("systemctl --user enable startup-user.service "
+                   ">/dev/null 2>&1") != 0)
+            log_msg("install: NOTE systemctl --user enable failed; "
+                    "enable manually: systemctl --user enable "
+                    "startup-user.service");
+        log_msg("install: user systemd unit registered and enabled: %s "
+                "(starts at login; for boot without login run: "
+                "loginctl enable-linger \"$USER\")", file);
+    } else {
+        fprintf(f,
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=startup user supervisor\n"
+            "Comment=start application-class entries at logon\n"
+            "Exec=\"%s\" -d user\n"
+            "Terminal=false\n"
+            "X-GNOME-Autostart-enabled=true\n",
+            exeabs);
+        fclose(f);
+        chmod(file, 0755);
+        log_msg("install: user autostart registered: %s -> \"%s\" -d user",
+                file, exeabs);
+    }
     return 0;
 }
 
 static int uninstall_user_autostart(void)
 {
     char file[4096];
+    int  removed = 0;
+    int  rc = 0;
 
-    if (autostart_file(file, sizeof(file)) != 0) {
-        log_msg("uninstall: cannot determine the autostart location");
-        return 1;
+    /* remove either registration style (user unit and/or autostart
+     * file), whichever exists - a machine may have been registered
+     * while systemd was off/on */
+    if (userunit_file(file, sizeof(file)) == 0 && file_exists(file)) {
+        if (system("systemctl --user disable startup-user.service "
+                   ">/dev/null 2>&1") != 0)
+            log_msg("uninstall: NOTE systemctl --user disable failed");
+        if (unlink(file) != 0) {
+            log_msg("uninstall: could not remove %s", file);
+            rc = 1;
+        } else {
+            log_msg("uninstall: user systemd unit removed: %s", file);
+            removed = 1;
+        }
+        if (system("systemctl --user daemon-reload >/dev/null 2>&1") != 0)
+            log_msg("uninstall: NOTE systemctl --user daemon-reload "
+                    "unavailable");
     }
-    if (!file_exists(file)) {
-        log_msg("uninstall: no user autostart entry at %s", file);
-        return 0;
+    if (autostart_file(file, sizeof(file)) == 0 && file_exists(file)) {
+        if (unlink(file) != 0) {
+            log_msg("uninstall: could not remove %s", file);
+            rc = 1;
+        } else {
+            log_msg("uninstall: user autostart entry removed: %s", file);
+            removed = 1;
+        }
     }
-    if (unlink(file) != 0) {
-        log_msg("uninstall: could not remove %s", file);
-        return 1;
+    if (!removed && rc == 0) {
+        log_msg("uninstall: no user-side registration found");
     }
-    log_msg("uninstall: user autostart entry removed: %s", file);
-    return 0;
+    return rc;
 }
 
 static int install_system(const char *exeabs, const char *conffile)

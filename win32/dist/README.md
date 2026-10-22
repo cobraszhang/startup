@@ -10,7 +10,7 @@
 | 版本 | 入口 | 开机自启方式 |
 |---|---|---|
 | Win32 | `win32/win32_service.c`（服务/CLI 入口）+ `win32/win32_gui.c`（无参数时的配置/状态窗口）+ 共享 `src/cli.c` | 系统类：**Windows 系统服务**（自动启动，登录前的开机阶段拉起；v0.2.1 起，旧安装的“延迟自启”会在服务启动时自动纠正）；用户类：**当前用户 Run 注册项**（`install` 一并写入；登录时拉起 `user` supervisor） |
-| POSIX | `posix/posix_main.c`（开机/supervisor/CLI 入口）+ 共享 `src/cli.c` | 系统类：`install` 自动生成 systemd unit（有 systemd 时）或 rc.local 行；用户类：`install` 写入 XDG autostart 条目（手工方式见 contrib/startup-user.*） |
+| POSIX | `posix/posix_main.c`（开机/supervisor/CLI 入口）+ 共享 `src/cli.c` | 系统类：`install` 自动生成 systemd unit（有 systemd 时）或 rc.local 行；用户类：`install` 写入 systemd **user** unit（有 systemd 时）或 XDG autostart 条目（手工方式见 contrib/startup-user.*） |
 
 ## 目录结构
 
@@ -141,7 +141,7 @@ deps = appserver                      ; 用户类依赖系统类：跨类别，�
 | 类别 | 配置 | 由谁启动（Win32） | 由谁启动（POSIX） | 控制端点 |
 |---|---|---|---|---|
 | 系统类 | 缺省或 `type = system` | Windows 服务 `AppBootLauncher`（`install`，自动启动：登录前的开机阶段拉起） | systemd `startup.service`（`serve`）/ SysV | `\\.\pipe\AppBootLauncher` / `/tmp/bootlauncher.ctl` |
-| 用户类 | `type = application` | 当前用户 Run 注册项（`install` 一并写入；单独 `install-user` 写 `AppBootLauncherUser` → `"exe" user`） | 当前用户 XDG autostart 条目 `~/.config/autostart/startup-user.desktop`（`install` 写入，已存在则不动；手工模板 contrib/startup-user.*） | `\\.\pipe\AppBootLauncherUser` / `/tmp/bootlauncher-user.ctl` |
+| 用户类 | `type = application` | 当前用户 Run 注册项（`install` 一并写入；单独 `install-user` 写 `AppBootLauncherUser` → `"exe" user`） | systemd 运行时：当前用户的 user unit `~/.config/systemd/user/startup-user.service`（`install` 写入并 `systemctl --user enable`，登录即启动）；无 systemd 的桌面：XDG autostart 条目（均已存在则不动；手工模板 contrib/startup-user.*） | `\\.\pipe\AppBootLauncherUser` / `/tmp/bootlauncher-user.ctl` |
 
 顺序保证（`user` 入口在启动任何用户类应用之前）：
 
@@ -177,12 +177,16 @@ CLI 的 `app` 子命令自动跨两端：`list/status/shutdown` 不带名字时*
   别的用户配置单元）；`uninstall` 两者都删除。只想单独管理 Run 项时用
   `install-user` / `uninstall-user`（无需管理员）。GUI 的“安装服务/卸载服务”按钮同样成对处理。
 - POSIX：`startup install` 同样一次完成两侧——**先分析、只补缺失**：
-  用户类条目 = 当前用户的 XDG autostart 桌面文件（`~/.config/autostart/startup-user.desktop`，
-  已存在则原样保留不动）；系统类 = systemd 在跑时生成 `/etc/systemd/system/startup.service`
+  用户类条目按环境自动选择正确形态——systemd 在跑时写当前用户的 user unit
+  `~/.config/systemd/user/startup-user.service` 并 `systemctl --user enable`（登录即启动、无需 root；
+  想无登录也启动：`loginctl enable-linger "$USER"`），没有 systemd 时写 XDG autostart 桌面文件
+  （`~/.config/autostart/startup-user.desktop`）；两种都已存在则原样保留不动（含自定义过的）。
+  系统类 = systemd 在跑时生成 `/etc/systemd/system/startup.service`
   （ExecStart 指向本程序绝对路径 `-d serve`，自动 enable），没有 systemd 时追加
   `/etc/rc.local` 一行（已含 `-d serve` 则不动）；`/etc` 需要 root——非 root 会自动做一次
   `sudo -n` 重试（无免密 sudo 时给出 `sudo <程序> install-system` 手动指引）。
-  `uninstall` 成对删除（unit 会先 disable 再删、rc.local 只剥离相应行）；
+  `uninstall` 成对删除（user unit 会先 disable 再删、两种用户侧形态都清；系统 unit 同样先
+  disable 再删、rc.local 只剥离相应行）；
   `install-system` / `uninstall-system` 单独管理系统侧。手工方式（contrib/ 下的 unit 与
   autostart 模板、会话脚本）仍然可用，效果等同。
 
@@ -495,17 +499,22 @@ APPBOOT_GUI_SHOT=/tmp/gui.png ./build/release/startup -c cfg.conf
 只添加缺失的部分**）：
 
 ```sh
-/usr/local/bin/startup install      # autostart 条目(当前用户) + systemd unit 或 rc.local(需 root)
+/usr/local/bin/startup install      # 用户侧(user unit 或 autostart) + 系统侧(unit 或 rc.local)
 /usr/local/bin/startup uninstall    # 成对删除
 ```
 
-- 用户侧写入 `~/.config/autostart/startup-user.desktop`（`Exec="<程序绝对路径>" -d user`）；
-  文件已存在时不覆盖不改（包括你自己定制过的版本），日志会说明“already present”。
-- 系统侧：检测到 systemd（`/run/systemd/system`）时生成并 enable
-  `/etc/systemd/system/startup.service`（`ExecStart=<绝对路径> -d serve`、
-  `Restart=on-failure`）；无 systemd（WSL 默认、容器）时改 `/etc/rc.local`（存在含
-  `-d serve` 的行即视为已注册）。需要 root；非 root 自动 `sudo -n` 重试一次，失败则
-  给出 `sudo <程序> install-system` 指引（`install-system/uninstall-system` 单独管理这侧）。
+- 用户侧按环境自动选形态：**systemd 在跑**（有 `/run/systemd/system`，含启用 systemd 的 WSL）
+  → 写 `~/.config/systemd/user/startup-user.service`（`ExecStart="<程序绝对路径>" -d user`）并
+  `systemctl --user enable`——登录即启动，无需 root；要让该用户在**无登录**时也启动：
+  `loginctl enable-linger "$USER"`。无 systemd 的桌面会话 → 写 XDG autostart 文件
+  `~/.config/autostart/startup-user.desktop`。两种形态的目录都由 `install` 自动创建
+  （`~/.config` 不需要预先存在）；文件已存在时不覆盖不改（包括你自己定制过的版本），
+  日志会说明“already present”。
+- 系统侧：systemd 在跑时生成并 enable `/etc/systemd/system/startup.service`
+  （`ExecStart=<绝对路径> -d serve`、`Restart=on-failure`）；无 systemd（未启用的 WSL、容器）
+  时改 `/etc/rc.local`（存在含 `-d serve` 的行即视为已注册）。需要 root；非 root 自动
+  `sudo -n` 重试一次，失败则给出 `sudo <程序> install-system` 指引
+  （`install-system/uninstall-system` 单独管理这侧）。
 
 手工方式仍然可用（效果等同，适合需要自定义 unit 的场景）：
 
@@ -521,7 +530,8 @@ APPBOOT_GUI_SHOT=/tmp/gui.png ./build/release/startup -c cfg.conf
 
 ### POSIX 用户类（登录侧）
 
-`install` 已自动注册用户侧；也可以手工把用户类挂到桌面会话：
+`install` 已自动注册用户侧（systemd 环境 = user unit + `--user enable`，见上）。
+没有 systemd 的桌面会话也可以手工挂 autostart：
 
 ```sh
 mkdir -p ~/.config/autostart
@@ -563,12 +573,17 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 ## 已通过的验证
 
 - **v0.2.2 POSIX `install/uninstall`**：与 Win32 对等的双侧注册（先分析、只补缺失）——
-  用户侧 XDG autostart 桌面文件（存在即保留，含自定义过的）、系统侧 systemd unit
-  （检测 `/run/systemd/system`；生成 + `systemctl enable`）或无 systemd 时 `/etc/rc.local`
-  行（含 `-d serve` 即视为已注册）；非 root 自动 `sudo -n` 单次重试，失败给出手动指引。
-  `uninstall` 成对删除（unit 先 disable 再删，rc.local 仅剥离相应行重写文件）。
-  测试套件新增第 14 节 4 项断言（封闭在临时 XDG 目录），全量 **34/34 通过**；
-  确认测试未在 WSL 留下系统侧副作用（无 unit、无 rc.local 行）。
+  用户侧按环境选形态：systemd 在跑（检测 `/run/systemd/system`）时写
+  `~/.config/systemd/user/startup-user.service` 并 `systemctl --user enable`（无需 root；
+  `loginctl enable-linger` 可选无登录启动），无 systemd 时写 XDG autostart 桌面文件；
+  任一已存在即保留不动（含自定义过的）。系统侧：systemd → `/etc/systemd/system/startup.service`
+  （生成 + `systemctl enable`），无 systemd → `/etc/rc.local` 行（含 `-d serve` 即视为已注册）；
+  非 root 自动 `sudo -n` 单次重试，失败给出手动指引。
+  `uninstall` 成对删除（unit 先 disable 再删，两种用户侧形态都清，rc.local 仅剥离相应行重写文件）。
+  测试套件新增第 14 节 4 项断言（封闭在临时 XDG 目录，两种形态均可），全量 **34/34 通过**；
+  真机 WSL（Ubuntu-24.04，systemd 运行、用户 manager running）：`install` 生成 user unit 并
+  `is-enabled = enabled`，目录自动创建（`~/.config` 原先不存在），系统侧因 sudo 需要密码正确
+  走出手动指引路径。
 - **用户侧控制台窗口问题**（真机反馈：开机加载的 DSH 带一个不能关的控制台窗口，双击
   启动则没有）：根因是用户侧 supervisor 启动子进程时沿用了服务侧的 `CREATE_NO_WINDOW`
   ——它给每个子进程一个**隐藏的新控制台**，Node/Electron 宿主检测到控制台会把窗口
