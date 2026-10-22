@@ -467,16 +467,19 @@ int cfg_save(const char *path, const app_t *apps, int n)
           "deps = comma separated prerequisites; wait = ms after start\r\n"
           "# optional per app: cwd = working directory; "
           "output = file for stdout+stderr; "
-          "type = system or application; "
-          "load = start, stop or auto\r\n\r\n",
+          "type = system or application\r\n"
+          "# load = start, stop or auto: always written (default start)\r\n\r\n",
           f);
     for (i = 0; i < n; i++) {
         fprintf(f, "[%s]\r\n", apps[i].name);
         fprintf(f, "cmd = %s\r\n", apps[i].cmd ? apps[i].cmd : "");
         if (apps[i].type)
             fprintf(f, "type = %s\r\n", apps[i].type);
-        if (apps[i].load)
-            fprintf(f, "load = %s\r\n", apps[i].load);
+        /* boot policy is always explicit: the effective default value
+         * is written out so every entry states its own boot behaviour */
+        fprintf(f, "load = %s\r\n",
+                app_load(&apps[i]) == LOAD_STOP ? "stop" :
+                app_load(&apps[i]) == LOAD_AUTO ? "auto" : "start");
         if (apps[i].cwd)
             fprintf(f, "cwd = %s\r\n", apps[i].cwd);
         if (apps[i].output)

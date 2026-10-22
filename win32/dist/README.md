@@ -24,7 +24,7 @@ src/                仅放跨平台共享源文件（纯 C89）
   log.[ch]            带时间戳的日志（可重定向到 GUI）
   cli.[ch]            共享命令行管理接口（Win32 与 POSIX 同一个 cli_main）
   state.[ch]          开机加载 load=auto 的状态日志（启动/退出事件追加记录，开机查询末态）
-  version.h           发布版本号单一来源（当前 0.2.3）
+  version.h           发布版本号单一来源（当前 0.2.4）
   ipc.[ch]            服务进程↔用户进程控制协议（共享语法与客户端调用）
 
 win32/              Win32 平台源文件与工程文件
@@ -57,7 +57,7 @@ posix/              *nix 平台源文件与工程文件
 
 ## 版本
 
-当前发布版本：**v0.2.3**（git 标签 `v0.2.3`）。
+当前发布版本：**v0.2.4**（git 标签 `v0.2.4`）。
 
 版本号的单一来源是 `src/version.h`（`APPBOOT_VERSION`），CLI 的 `version` 子命令、
 `-V`、usage 头行、两版 GUI 窗口标题和服务日志都从这里取。发版时同步三处：
@@ -122,7 +122,7 @@ output = D:\logs\appserver.log        ; 子进程 stdout+stderr 追加到文件�
 [traytool]
 cmd = C:\tools\tray.exe
 type = application                    ; 用户类：登录时由用户侧 supervisor 启动（可选，默认 system）
-load = auto                           ; 开机加载策略：start|stop|auto（可选，默认 start，见下）
+load = auto                           ; 开机加载策略：start|stop|auto（缺省 start；保存时总会显式写出）
 deps = appserver                      ; 用户类依赖系统类：跨类别，天然满足（系统类必然先启动）
 ```
 
@@ -135,7 +135,7 @@ deps = appserver                      ; 用户类依赖系统类：跨类别，�
 - `cwd` 设定应用的初始工作目录（留空 = 继承启动方）。很多程序把数据、日志、会话目录解析到工作目录上——POSIX 侧子进程先 `chdir`（失败则该应用不启动并报错），Win32 侧传给 `CreateProcess` 的 `lpCurrentDirectory`。
 - `output` 把子进程的 stdout+stderr **追加**写入该文件（POSIX 用 `dup2`，Win32 用 `STARTF_USESTDHANDLES`；文件打开失败仍照常启动，仅记一条日志）。有了它就不再需要 `cmd /c … > 日志` 这类包装——**包装会让 supervisor 监控到包装进程而非应用主进程**，状态与控制都会失真。
 - `type` 指定启动类别：`system`（缺省，不写即系统类）或 `application`。两个类别由**不同的启动方**拉起并各自常驻 supervisor（详见“两类启动”）：系统类由开机侧启动，用户类由登录侧启动；`type` 只接受这两个值，其他值报解析错误。旧配置（无 `type` 键）行为与之前完全一致（全部按系统类两阶段序启动）。
-- `load` 指定**开机加载策略**（与类别正交，两类别通用；`start`/`stop`/`auto`，缺省 `start`，旧配置行为不变）：
+- `load` 指定**开机加载策略**（与类别正交，两类别通用；`start`/`stop`/`auto`，缺省 `start`，旧配置行为不变）。**自 v0.2.4 起该键总是显式写出**：任何保存（GUI/CLI）都会给每个条目写入其生效值（未设置即 `load = start`），配置文件对每个条目的开机行为完全自说明；手工删除该行效果同缺省。语义：
   - `start`：开机（supervisor 引导）时总是启动；
   - `stop`：开机时**不**启动——条目保留在配置里，随时可手动 `app start` 或 GUI 启动；
   - `auto`：开机时查询**状态日志**中该条目的最后一次状态记录：上次处于运行 → 启动；上次已停止（或从未运行过）→ 不启动。
@@ -563,7 +563,7 @@ cd posix && sh test/run_posix_tests.sh
 #   wsl -u root bash -c "cd /mnt/d/My/DEV/startup/posix && sh test/run_posix_tests.sh"
 ```
 
-40 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
+41 项检查，其中第 10 节专门测控制接口：用 `test/ctl.conf`（长驻 dummy 应用）起一个
 自定义端点的 `serve`，走 `app ping/status/stop/restart/unknown/shutdown` 全序列，
 并验证服务退出后 `app` 命令 rc=3；第 11 节验证脚本解释器自动解析（shebang 直启、
 无执行位补 `/bin/sh`、`.py` 补 python3、未知扩展名拒绝启动）；第 13 节验证启动类别：
@@ -575,7 +575,8 @@ ERR、`set type` 往返与空值清除；第 14 节验证注册命令的幂等�
   的 no-op（系统侧依赖 root/环境，不作断言）；第 15 节验证开机加载：`load = stop` 与无记录的
    `load = auto` 在开机引导时不启动、已启动条目被追加记录为 running、状态日志标记
    running 后 auto 条目启动、末态 stopped 后 auto 条目保持不启动、非法 `load` 值被
-   配置解析拒绝、`set load` 经 list 的 awk 块断言往返。
+   配置解析拒绝、`set load` 经 list 的 awk 块断言往返、保存后的配置对每个条目**显式写出
+   生效的 load 值**（缺省 start）。
 
 Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop` 控制接口验证，
 以及“卸载后服务必须从 SCM 彻底消失（`sc query` 返回 1060）”断言）：
@@ -586,6 +587,11 @@ Win32 服务完整生命周期（含服务运行期间跨进程 `app status/stop
 
 ## 已通过的验证
 
+- **v0.2.4 显式缺省**：`cfg_save` 现在为每个条目写出 `load = <生效值>`（缺省 start）——
+  保存出的配置完全自说明；解析端不变（缺键 = start，旧配置行为不变）。测试第 15 节新增
+  断言（保存后 `load = start` 必现），**41/41 通过**；旧断言无一被新行为破坏；
+  win32 四配置零警告。历史版本归档 `startup-0.1.1/0.2.0/0.2.1/0.2.2.zip`（git tag
+  快照，含各版本 dist 二进制）已导出到 `d:\my\dev\`。
 - **v0.2.3 开机加载策略（`load = start|stop|auto`）与状态日志**：共享 `src/state.[ch]`
   事件驱动记录（启动成功 → running；退出/停止 → stopped；崩溃无事件、末条仍为 running，
   auto 语义自然正确），状态日志随 `BOOTLAUNCHER_LOG` 同目录，否则

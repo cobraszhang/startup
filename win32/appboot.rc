@@ -1,15 +1,15 @@
 /* appboot.rc - Win32 VERSIONINFO resource for the launcher executables.
  *
  * NOTE: the numeric FILEVERSION/PRODUCTVERSION must be kept in sync with
- * src/version.h (currently 0.2.3). Strings are ASCII only so that both
+ * src/version.h (currently 0.2.4). Strings are ASCII only so that both
  * rc.exe (VC6) and windres (MinGW) embed them identically.
  * Build: windres -i appboot.rc -o appboot.res, then link appboot.res.
  */
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,3,0
- PRODUCTVERSION 0,2,3,0
+ FILEVERSION 0,2,4,0
+ PRODUCTVERSION 0,2,4,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -22,8 +22,8 @@ BEGIN
         BEGIN
             VALUE "CompanyName",  "startup\0"
             VALUE "FileDescription", "startup\0"
-            VALUE "FileVersion",     "0.2.3\0"
-            VALUE "ProductVersion",  "0.2.3\0"
+            VALUE "FileVersion",     "0.2.4\0"
+            VALUE "ProductVersion",  "0.2.4\0"
             VALUE "ProductName",     "startup\0"
             VALUE "InternalName",    "startup\0"
             VALUE "OriginalFilename","startup.exe\0"

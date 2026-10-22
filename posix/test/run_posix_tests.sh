@@ -588,6 +588,11 @@ if ./build/release/startup -c "$LD/rt15.conf" list \
             END{exit !g}'; then ok=0; fi
 report "set load persists; list shows the effective value" $ok
 
+# g) cfg_save always writes the effective load value (explicit default)
+ok=1
+if grep -q 'load = start' "$LD/rt15.conf"; then ok=0; fi
+report "saved configs state every entry's boot policy explicitly" $ok
+
 rm -rf "$CD"
 
 echo
